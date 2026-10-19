@@ -338,7 +338,7 @@ def main():
     srv.daemon_threads = True
     url = "http://%s:%d/" % (args.host, args.port)
     print("=" * 52)
-    print("  GPT Image 2.5 工作台已启动")
+    print("  GPT Image Studio 已启动")
     print("  %s" % url)
     print("=" * 52)
     print("输出目录: %s" % OUT_DIR)
