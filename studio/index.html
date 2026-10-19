@@ -27,10 +27,14 @@
   }
   .logo{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#2f5cff,#7c3aed);
     display:grid;place-items:center;color:#fff;font-size:13px;font-weight:700;letter-spacing:-.5px}
-  h1{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em}
+  h1{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
   .chip{font-size:12px;color:var(--ink-2);background:var(--bg);border:1px solid var(--line);
     padding:3px 9px;border-radius:999px;white-space:nowrap}
   .chip b{font-weight:600;color:var(--ink)}
+  select.chip{appearance:none;-webkit-appearance:none;cursor:pointer;padding-right:24px;flex:0 0 auto;max-width:230px;
+    background-image:linear-gradient(45deg,transparent 50%,#8b8b93 50%),linear-gradient(135deg,#8b8b93 50%,transparent 50%);
+    background-position:calc(100% - 13px) 52%,calc(100% - 9px) 52%;background-size:4px 4px,4px 4px;background-repeat:no-repeat}
+  select.chip:hover{border-color:#d4d4d8;color:var(--ink)}
   .grow{flex:1}
   .ghost{background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 12px;font-size:13px;color:var(--ink-2)}
   .ghost:hover{border-color:#d4d4d8;color:var(--ink)}
@@ -118,7 +122,7 @@
 <header>
   <div class="logo">G2</div>
   <h1>GPT Image Studio</h1>
-  <span class="chip" id="modelChip">模型 …</span>
+  <select class="chip" id="modelSel" title="切换模型（一把 Auto Key 可切多个模型）"></select>
   <span class="chip" id="gateway">网关 …</span>
   <div class="grow"></div>
   <button class="ghost" id="btnFolder">打开输出目录</button>
@@ -162,7 +166,15 @@
             <option value="1024x768">4:3 横向</option>
             <option value="1080x1440">3:4 纵向</option>
             <option value="2560x1080">21:9 超宽</option>
+            <option value="3840x2160">3840×2160（4K 分组专用）</option>
+            <option value="custom">自定义宽高…</option>
           </select>
+          <div id="customSize" style="display:none;margin-top:8px">
+            <div class="row">
+              <input type="number" id="cw" placeholder="宽" min="256" max="4096" step="16" value="1280" />
+              <input type="number" id="ch" placeholder="高" min="256" max="4096" step="16" value="720" />
+            </div>
+          </div>
         </div>
         <div>
           <label class="f">质量</label>
@@ -193,6 +205,9 @@
         </div>
       </div>
 
+      <script>document.getElementById("size").addEventListener("change", function(){
+        document.getElementById("customSize").style.display = this.value === "custom" ? "block" : "none";
+      });</script>
       <button class="primary" id="run">生成 <span style="opacity:.7;font-weight:400">Ctrl+Enter</span></button>
       <div class="hint">尺寸只决定比例，实际像素由模型决定（多数实现会量化到固定档位，常见约 1.5MP）。单次通常 20–45s，编辑更久；一次出 1 张。</div>
       <div class="err" id="err"></div>
@@ -242,11 +257,28 @@
 const $ = (s) => document.querySelector(s);
 const state = { mode: "generate", refs: [], current: null, busy: false, t0: 0 };
 
+/* ---------- 模型切换 ---------- */
+async function refreshModelList(current){
+  const sel = $("#modelSel");
+  const opts = [current];
+  try{
+    const r = await fetch("/api/models", { method: "POST", headers: {"Content-Type": "application/json"}, body: "{}" }).then(x => x.json());
+    if(r.ok) (r.models || []).forEach(m => { if(!opts.includes(m)) opts.push(m); });
+  }catch(e){}
+  sel.innerHTML = opts.map(m => `<option value="${m}">模型 ${m}</option>`).join("");
+  sel.value = current;
+}
+$("#modelSel").onchange = async () => {
+  const m = $("#modelSel").value;
+  await fetch("/api/config", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ model: m }) });
+  $("#cfgModel").value = m;
+};
+
 /* ---------- 设置 ---------- */
 async function loadConfig(){
   const r = await fetch("/api/config").then(r=>r.json());
   $("#gateway").innerHTML = "网关 <b>" + r.base_url.replace(/^https?:\/\//,"") + "</b>";
-  $("#modelChip").innerHTML = "模型 <b>" + r.model + "</b>";
+  await refreshModelList(r.model);
   $("#cfgBase").value = r.base_url;
   $("#cfgModel").value = r.model;
   $("#cfgKey").placeholder = r.has_key ? ("当前：" + r.key_masked) : "粘贴你的 API Key";
@@ -352,9 +384,15 @@ async function run(){
   if(state.mode === "edit" && !state.refs.length){ showErr("参考图编辑至少要给一张图"); return; }
   hideErr(); setBusy(true);
 
+  let size = $("#size").value;
+  if(size === "custom"){
+    const w = parseInt($("#cw").value || "0", 10), h = parseInt($("#ch").value || "0", 10);
+    if(!(w >= 256 && h >= 256)){ showErr("自定义宽高至少 256×256"); setBusy(false); return; }
+    size = w + "x" + h;
+  }
   const payload = {
     prompt,
-    size: $("#size").value,
+    size,
     quality: $("#quality").value,
     background: $("#background").value || null,
     response_format: $("#response_format").value,
@@ -419,6 +457,12 @@ async function loadHistory(){
       <img loading="lazy" src="${it.url}">
       <button class="del" data-name="${it.name}">删</button>
     </div>`).join("");
+  if(items.length && !state.current){
+    const f = items[0];
+    $("#canvas").innerHTML = `<img src="${f.url}" alt="">`;
+    $("#meta").style.display = "flex";
+    $("#meta").innerHTML = `<span class="k">最近一张 <b>${(f.meta||{}).quality || ""}</b></span><span class="k">${f.name}</span>`;
+  }
   $("#hist").querySelectorAll(".thumb").forEach(t=>{
     t.onclick = (e)=>{
       if(e.target.classList.contains("del")) return;
