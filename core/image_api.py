@@ -104,6 +104,29 @@ def _extract(resp):
     return blob, ext
 
 
+def list_models(base_url=DEFAULT_BASE, api_key="", timeout=30):
+    """Return the model ids this endpoint exposes (GET {base_url}/models)."""
+    url = (base_url or DEFAULT_BASE).rstrip("/") + "/models"
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Bearer " + api_key,
+        "User-Agent": "gpt-image-studio",
+    })
+    try:
+        with _opener().open(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise APIError(e.code, e.read().decode("utf-8", "replace")[:300]) from None
+    except urllib.error.URLError as e:
+        raise APIError(0, "network error: %s" % (e.reason,)) from None
+    items = data.get("data") if isinstance(data, dict) else data
+    ids = []
+    for it in items or []:
+        mid = it.get("id") if isinstance(it, dict) else it
+        if isinstance(mid, str) and mid:
+            ids.append(mid)
+    return ids
+
+
 def _fields(model, size, quality, background, response_format, moderation, user):
     return {
         "model": model or DEFAULT_MODEL,
