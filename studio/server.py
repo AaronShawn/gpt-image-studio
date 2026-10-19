@@ -1,0 +1,358 @@
+"""Local web workbench for OpenAI-compatible image APIs.
+
+    python server.py                     # http://127.0.0.1:8756
+    python server.py --port 9000 --open  # custom port, open the browser
+
+Turns clicks in the browser into Images API calls, stores the results under
+../outputs, and keeps the API key in a local config.json only — it is never
+sent to the page and never embedded in the HTML.
+"""
+
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJ = os.path.dirname(ROOT)
+sys.path.insert(0, os.path.join(PROJ, "core"))
+
+import image_api as api  # noqa: E402
+
+CONFIG_PATH = os.path.join(PROJ, "config.json")
+OUT_DIR = os.path.join(PROJ, "outputs")
+DEFAULT = {
+    "base_url": api.DEFAULT_BASE,
+    "api_key": "",
+    "model": api.DEFAULT_MODEL,
+}
+LOCK = threading.Lock()
+
+
+def load_config():
+    cfg = dict(DEFAULT)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                cfg.update(json.load(f) or {})
+        except Exception:
+            pass
+    return cfg
+
+
+def save_config(cfg):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def mask(key):
+    if not key:
+        return ""
+    if len(key) <= 10:
+        return key[:3] + "***"
+    return key[:6] + "*" * 8 + key[-4:]
+
+
+def read_body(handler):
+    n = int(handler.headers.get("Content-Length") or 0)
+    if not n:
+        return {}
+    return json.loads(handler.rfile.read(n).decode("utf-8"))
+
+
+def data_url_to_bytes(s):
+    if "," in s and s.strip().startswith("data:"):
+        head, b64 = s.split(",", 1)
+        mime = head[5:].split(";")[0] or "image/png"
+        return b64, mime
+    return s, "image/png"
+
+
+class Server(ThreadingHTTPServer):
+    # Windows 上 SO_REUSEADDR 允许两个进程抢同一端口，必须关掉，
+    # 否则第二次启动会"成功"但请求被另一个实例吃掉。
+    allow_reuse_address = False
+    daemon_threads = True
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "GPTImage25Studio/1.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+
+    # ---------- helpers ----------
+    def send_json(self, obj, code=200):
+        blob = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(blob)
+
+    def send_file(self, path, download=False):
+        if not os.path.isfile(path):
+            self.send_error(404)
+            return
+        ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        if download:
+            self.send_header(
+                "Content-Disposition", 'attachment; filename="%s"' % os.path.basename(path)
+            )
+        self.end_headers()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
+    # ---------- routes ----------
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path in ("/", "/index.html"):
+            self.send_file(os.path.join(ROOT, "index.html"))
+        elif path.startswith("/outputs/"):
+            name = os.path.basename(path)
+            self.send_file(os.path.join(OUT_DIR, name), download="dl=1" in self.path)
+        elif path == "/api/config":
+            cfg = load_config()
+            self.send_json(
+                {
+                    "base_url": cfg["base_url"],
+                    "model": cfg["model"],
+                    "has_key": bool(cfg["api_key"]),
+                    "key_masked": mask(cfg["api_key"]),
+                }
+            )
+        elif path == "/api/history":
+            self.send_json({"items": list_outputs()})
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        try:
+            if path == "/api/config":
+                body = read_body(self)
+                cfg = load_config()
+                if body.get("base_url"):
+                    cfg["base_url"] = body["base_url"].strip().rstrip("/")
+                if body.get("model"):
+                    cfg["model"] = body["model"].strip()
+                if body.get("api_key"):
+                    cfg["api_key"] = body["api_key"].strip()
+                if body.get("clear_key"):
+                    cfg["api_key"] = ""
+                save_config(cfg)
+                return self.send_json({
+                    "ok": True,
+                    "base_url": cfg["base_url"],
+                    "model": cfg["model"],
+                    "has_key": bool(cfg["api_key"]),
+                    "key_masked": mask(cfg["api_key"]),
+                })
+
+            if path == "/api/generate":
+                return self.handle_generate(read_body(self))
+
+            if path == "/api/edit":
+                return self.handle_edit(read_body(self))
+
+            if path == "/api/open-folder":
+                os.startfile(OUT_DIR)  # noqa: S606 (Windows only)
+                return self.send_json({"ok": True})
+
+            if path == "/api/delete":
+                body = read_body(self)
+                name = os.path.basename(body.get("name") or "")
+                for p in (os.path.join(OUT_DIR, name), os.path.join(OUT_DIR, name + ".json")):
+                    if name and os.path.isfile(p):
+                        os.remove(p)
+                return self.send_json({"ok": True})
+
+            self.send_error(404)
+        except api.APIError as e:
+            self.send_json({"ok": False, "error": str(e), "status": e.status, "detail": e.body}, 200)
+        except Exception as e:  # noqa: BLE001
+            self.send_json({"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 200)
+
+    # ---------- business ----------
+    def handle_generate(self, body):
+        cfg = load_config()
+        if not cfg["api_key"]:
+            return self.send_json({"ok": False, "error": "还没有填 API Key"}, 200)
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            return self.send_json({"ok": False, "error": "prompt 不能为空"}, 200)
+        opts = dict(
+            base_url=cfg["base_url"],
+            model=cfg["model"],
+            size=body.get("size") or "auto",
+            quality=body.get("quality") or "high",
+            background=body.get("background") or None,
+            response_format=body.get("response_format") or "b64_json",
+            timeout=int(body.get("timeout") or 300),
+        )
+        res = api.generate(prompt, cfg["api_key"], **opts)
+        meta = {
+            "type": "generate",
+            "prompt": prompt,
+            "size": body.get("size"),
+            "quality": body.get("quality"),
+            "background": body.get("background"),
+            "usage": res["usage"],
+            "elapsed": res["elapsed"],
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        path = api.save(OUT_DIR, res["image"], res["ext"], "gen", meta)
+        self.send_json(
+            {
+                "ok": True,
+                "file": os.path.basename(path),
+                "url": "/outputs/" + os.path.basename(path),
+                "elapsed": res["elapsed"],
+                "usage": res["usage"],
+            }
+        )
+
+    def handle_edit(self, body):
+        cfg = load_config()
+        if not cfg["api_key"]:
+            return self.send_json({"ok": False, "error": "还没有填 API Key"}, 200)
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            return self.send_json({"ok": False, "error": "prompt 不能为空"}, 200)
+        files = []
+        for i, item in enumerate(body.get("images") or []):
+            b64, _ = data_url_to_bytes(item.get("data") or "")
+            blob = base64.b64decode(b64)
+            files.append((item.get("name") or ("ref%d.png" % i), blob))
+        if not files:
+            return self.send_json({"ok": False, "error": "请先添加参考图"}, 200)
+
+        res = api.edit(
+            prompt,
+            files,
+            cfg["api_key"],
+            base_url=cfg["base_url"],
+            model=cfg["model"],
+            size=body.get("size") or "auto",
+            quality=body.get("quality") or "high",
+            background=body.get("background") or None,
+            input_fidelity=body.get("input_fidelity") or "high",
+            response_format=body.get("response_format") or "b64_json",
+            timeout=int(body.get("timeout") or 300),
+        )
+        meta = {
+            "type": "edit",
+            "prompt": prompt,
+            "refs": [f[0] for f in files],
+            "size": body.get("size"),
+            "quality": body.get("quality"),
+            "input_fidelity": body.get("input_fidelity"),
+            "usage": res["usage"],
+            "elapsed": res["elapsed"],
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        path = api.save(OUT_DIR, res["image"], res["ext"], "edit", meta)
+        self.send_json(
+            {
+                "ok": True,
+                "file": os.path.basename(path),
+                "url": "/outputs/" + os.path.basename(path),
+                "elapsed": res["elapsed"],
+                "usage": res["usage"],
+            }
+        )
+
+
+def list_outputs(limit=60):
+    if not os.path.isdir(OUT_DIR):
+        return []
+    names = [
+        n
+        for n in os.listdir(OUT_DIR)
+        if n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+    ]
+    names.sort(key=lambda n: os.path.getmtime(os.path.join(OUT_DIR, n)), reverse=True)
+    items = []
+    for n in names[:limit]:
+        p = os.path.join(OUT_DIR, n)
+        meta = {}
+        if os.path.isfile(p + ".json"):
+            try:
+                with open(p + ".json", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                pass
+        items.append(
+            {
+                "name": n,
+                "url": "/outputs/" + n,
+                "mtime": int(os.path.getmtime(p)),
+                "size_kb": int(os.path.getsize(p) / 1024),
+                "meta": meta,
+            }
+        )
+    return items
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8756)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--open", action="store_true")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    if not cfg["api_key"] and os.environ.get("APINEBULA_API_KEY"):
+        cfg["api_key"] = os.environ["APINEBULA_API_KEY"]
+        save_config(cfg)
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    srv = None
+    last_err = None
+    for p in [args.port + i for i in range(21)]:  # 端口被占就往后挪，最多试 21 个
+        try:
+            srv = Server((args.host, p), Handler)
+            args.port = p
+            break
+        except OSError as e:
+            last_err = e
+    if srv is None:
+        print("启动失败：%s" % last_err)
+        return
+    srv.daemon_threads = True
+    url = "http://%s:%d/" % (args.host, args.port)
+    print("=" * 52)
+    print("  GPT Image 2.5 工作台已启动")
+    print("  %s" % url)
+    print("=" * 52)
+    print("输出目录: %s" % OUT_DIR)
+    print("模型: %s @ %s" % (cfg["model"], cfg["base_url"]))
+    print("关闭本窗口即停止服务。")
+    if not cfg["api_key"]:
+        print("提示: 尚未配置 API Key，请在页面右上角「设置」里填写。")
+    if args.open:
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止")
+
+
+if __name__ == "__main__":
+    main()
