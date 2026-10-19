@@ -224,7 +224,12 @@
       <label class="f">接口地址 base_url</label>
       <input type="text" id="cfgBase" placeholder="https://api.openai.com/v1" />
       <label class="f">模型名 model</label>
-      <input type="text" id="cfgModel" placeholder="gpt-image-2.5-flare" />
+      <input type="text" id="cfgModel" list="modelList" placeholder="gpt-image-2.5-flare" autocomplete="off" />
+      <datalist id="modelList"></datalist>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+        <button class="ghost" id="pullModels" style="padding:4px 10px;font-size:12px">拉取模型列表</button>
+        <span id="modelHint" style="font-size:11.5px;color:var(--ink-3)">填好地址和 Key 后点一下，从列表里选</span>
+      </div>
       <label class="f">API Key</label>
       <input type="password" id="cfgKey" placeholder="留空表示不修改当前 Key" />
       <div class="hint">Key 只写进本机 <code>config.json</code>，仅服务端读取，不出现在页面或源码里。<br />第三方中转：把对方给的 base_url 和模型名填上即可，协议与官方一致。</div>
@@ -255,6 +260,25 @@ $("#presetOpenai").onclick = () => {
   $("#cfgModel").value = "gpt-image-2.5-flare";
 };
 $("#presetCustom").onclick = () => { $("#cfgBase").value = ""; $("#cfgBase").focus(); };
+$("#pullModels").onclick = async () => {
+  const hint = $("#modelHint");
+  hint.textContent = "查询中…";
+  try{
+    const r = await fetch("/api/models", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ base_url: $("#cfgBase").value.trim(), api_key: $("#cfgKey").value.trim() })
+    }).then(r => r.json());
+    if(!r.ok){
+      const msg = String(r.error || "未知错误");
+      hint.textContent = msg.indexOf("network") >= 0 ? "连不上这个地址，检查 base_url 是否写全 /v1" : "失败：" + msg;
+      return;
+    }
+    const ids = r.models || [];
+    $("#modelList").innerHTML = ids.map(m => `<option value="${m}">`).join("");
+    hint.textContent = ids.length ? ("找到 " + ids.length + " 个：" + ids.slice(0,3).join(" / ") + (ids.length>3?" …":"")) : "这个地址没返回任何模型";
+    if(ids.length === 1 && !$("#cfgModel").value.trim()) $("#cfgModel").value = ids[0];
+  }catch(e){ hint.textContent = "请求异常：" + e.message; }
+};
 $("#btnSettings").onclick = () => $("#modal").classList.add("on");
 $("#cfgCancel").onclick = () => $("#modal").classList.remove("on");
 $("#cfgSave").onclick = async () => {
