@@ -1,0 +1,10 @@
+config.json
+outputs/
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+comfyui/ComfyUI-GPTImageStudio/config.json
