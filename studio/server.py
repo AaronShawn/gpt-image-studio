@@ -165,6 +165,17 @@ class Handler(BaseHTTPRequestHandler):
                     "key_masked": mask(cfg["api_key"]),
                 })
 
+            if path == "/api/models":
+                body = read_body(self)
+                cfg = load_config()
+                base = (body.get("base_url") or cfg["base_url"]).strip().rstrip("/")
+                key = (body.get("api_key") or cfg["api_key"]).strip()
+                if not key:
+                    return self.send_json({"ok": False, "error": "请先填写 API Key"}, 200)
+                ids = api.list_models(base, key, timeout=int(body.get("timeout") or 30))
+                ids.sort(key=lambda m: (0 if "image" in m.lower() else 1, m))
+                return self.send_json({"ok": True, "models": ids})
+
             if path == "/api/generate":
                 return self.handle_generate(read_body(self))
 
