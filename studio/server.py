@@ -13,9 +13,11 @@ import base64
 import json
 import mimetypes
 import os
+import queue
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,6 +35,70 @@ DEFAULT = {
     "model": api.DEFAULT_MODEL,
 }
 LOCK = threading.Lock()
+
+# ---------- 任务队列 ----------
+JOBS = {}
+JOB_ORDER = []
+JOBS_LOCK = threading.Lock()
+TASK_Q = queue.Queue()
+MAX_JOBS = 40
+
+
+def _job_public(job):
+    return {
+        "id": job["id"], "status": job["status"], "mode": job["mode"],
+        "prompt": job["prompt"], "total": job["total"], "done": job["done"],
+        "failed": job["failed"], "size": job["size"], "quality": job["quality"],
+        "items": list(job["items"]), "errors": list(job["errors"])[:3],
+        "created": job["created"], "finished": job["finished"],
+    }
+
+
+def list_jobs():
+    with JOBS_LOCK:
+        return [_job_public(JOBS[i]) for i in reversed(JOB_ORDER) if i in JOBS]
+
+
+def worker_loop():
+    while True:
+        task = TASK_Q.get()
+        if task is None:
+            return
+        jid, payload = task
+        with JOBS_LOCK:
+            job = JOBS.get(jid)
+            if job is None:
+                TASK_Q.task_done()
+                continue
+            job["status"] = "running"
+        try:
+            if payload["mode"] == "edit":
+                res = api.edit(payload["prompt"], payload["files"], payload["api_key"], **payload["opts"])
+            else:
+                res = api.generate(payload["prompt"], payload["api_key"], **payload["opts"])
+            meta = {
+                "type": payload["mode"], "prompt": payload["prompt"],
+                "size": payload["opts"].get("size"), "quality": payload["opts"].get("quality"),
+                "usage": res["usage"], "elapsed": res["elapsed"], "job": jid,
+                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            path = api.save(OUT_DIR, res["image"], res["ext"], payload["mode"], meta)
+            item = {"file": os.path.basename(path), "url": "/outputs/" + os.path.basename(path),
+                    "elapsed": res["elapsed"], "usage": res["usage"]}
+            with JOBS_LOCK:
+                job["items"].append(item)
+                job["done"] += 1
+        except Exception as e:  # noqa: BLE001
+            with JOBS_LOCK:
+                job["errors"].append("%s: %s" % (type(e).__name__, e))
+                job["failed"] += 1
+        finally:
+            with JOBS_LOCK:
+                job = JOBS.get(jid)
+                if job and job["done"] + job["failed"] >= job["total"]:
+                    job["status"] = "failed" if (job["failed"] and not job["done"]) else "done"
+                    job["finished"] = time.time()
+            TASK_Q.task_done()
 
 
 def load_config():
@@ -139,6 +205,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif path == "/api/history":
             self.send_json({"items": list_outputs()})
+        elif path == "/api/jobs":
+            self.send_json({"jobs": list_jobs(), "pending": TASK_Q.qsize()})
         else:
             self.send_error(404)
 
@@ -176,6 +244,9 @@ class Handler(BaseHTTPRequestHandler):
                 ids.sort(key=lambda m: (0 if "image" in m.lower() else 1, m))
                 return self.send_json({"ok": True, "models": ids})
 
+            if path == "/api/jobs":
+                return self.handle_create_job(read_body(self))
+
             if path == "/api/generate":
                 return self.handle_generate(read_body(self))
 
@@ -201,6 +272,49 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 200)
 
     # ---------- business ----------
+    def handle_create_job(self, body):
+        cfg = load_config()
+        if not cfg["api_key"]:
+            return self.send_json({"ok": False, "error": "还没有填 API Key"}, 200)
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            return self.send_json({"ok": False, "error": "prompt 不能为空"}, 200)
+        mode = "edit" if body.get("mode") == "edit" else "generate"
+        try:
+            count = max(1, min(20, int(body.get("count") or 1)))
+        except (TypeError, ValueError):
+            count = 1
+        files = []
+        if mode == "edit":
+            for i, item in enumerate(body.get("images") or []):
+                b64, _ = data_url_to_bytes(item.get("data") or "")
+                files.append((item.get("name") or ("ref%d.png" % i), base64.b64decode(b64)))
+            if not files:
+                return self.send_json({"ok": False, "error": "请先添加参考图"}, 200)
+        opts = dict(
+            base_url=cfg["base_url"], model=cfg["model"],
+            size=body.get("size") or "auto",
+            quality=body.get("quality") or "high",
+            background=body.get("background") or None,
+            response_format=body.get("response_format") or "url",
+            timeout=int(body.get("timeout") or 300),
+        )
+        if mode == "edit":
+            opts["input_fidelity"] = body.get("input_fidelity") or "high"
+        jid = uuid.uuid4().hex[:10]
+        job = {"id": jid, "mode": mode, "prompt": prompt, "total": count, "done": 0, "failed": 0,
+               "status": "queued", "size": opts["size"], "quality": opts["quality"],
+               "items": [], "errors": [], "created": time.time(), "finished": None}
+        with JOBS_LOCK:
+            JOBS[jid] = job
+            JOB_ORDER.append(jid)
+            while len(JOB_ORDER) > MAX_JOBS:
+                JOBS.pop(JOB_ORDER.pop(0), None)
+        payload = {"mode": mode, "prompt": prompt, "api_key": cfg["api_key"], "opts": opts, "files": files}
+        for _ in range(count):
+            TASK_Q.put((jid, payload))
+        return self.send_json({"ok": True, "job": _job_public(job), "queued": TASK_Q.qsize()})
+
     def handle_generate(self, body):
         cfg = load_config()
         if not cfg["api_key"]:
@@ -214,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
             size=body.get("size") or "auto",
             quality=body.get("quality") or "high",
             background=body.get("background") or None,
-            response_format=body.get("response_format") or "b64_json",
+            response_format=body.get("response_format") or "url",
             timeout=int(body.get("timeout") or 300),
         )
         res = api.generate(prompt, cfg["api_key"], **opts)
@@ -264,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
             quality=body.get("quality") or "high",
             background=body.get("background") or None,
             input_fidelity=body.get("input_fidelity") or "high",
-            response_format=body.get("response_format") or "b64_json",
+            response_format=body.get("response_format") or "url",
             timeout=int(body.get("timeout") or 300),
         )
         meta = {
@@ -326,6 +440,7 @@ def main():
     ap.add_argument("--port", type=int, default=8756)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--open", action="store_true")
+    ap.add_argument("--workers", type=int, default=3, help="同时生成的任务数（默认 3）")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -347,6 +462,8 @@ def main():
         print("启动失败：%s" % last_err)
         return
     srv.daemon_threads = True
+    for _ in range(max(1, args.workers)):
+        threading.Thread(target=worker_loop, daemon=True).start()
     url = "http://%s:%d/" % (args.host, args.port)
     print("=" * 52)
     print("  GPT Image Studio 已启动")
@@ -354,6 +471,7 @@ def main():
     print("=" * 52)
     print("输出目录: %s" % OUT_DIR)
     print("模型: %s @ %s" % (cfg["model"], cfg["base_url"]))
+    print("并发生成: %d 路队列" % max(1, args.workers))
     print("关闭本窗口即停止服务。")
     if not cfg["api_key"]:
         print("提示: 尚未配置 API Key，请在页面右上角「设置」里填写。")
