@@ -78,10 +78,22 @@ def _multipart(fields, files):
     return bytes(out), "multipart/form-data; boundary=%s" % boundary
 
 
-def _download(url, timeout=120):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with _opener().open(req, timeout=timeout) as resp:
-        return resp.read()
+def _download(url, timeout=120, retries=2):
+    """Fetch the image from the temporary CDN link.
+
+    Some gateways reject requests without a browser-ish User-Agent, and slow
+    links occasionally drop mid-transfer, so retry a couple of times.
+    """
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _opener().open(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(1.5 * (attempt + 1))
+    raise APIError(0, "download failed after %d tries: %s" % (retries + 1, last))
 
 
 def _extract(resp):
