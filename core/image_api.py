@@ -210,12 +210,28 @@ def edit(prompt, images, api_key, base_url=DEFAULT_BASE, model=DEFAULT_MODEL, si
 
 
 def save(dest_dir, blob, ext=".png", prefix="img", meta=None):
-    """Write the image plus an optional sidecar .json, return the path."""
+    """Write the image plus an optional sidecar .json, return the path.
+
+    Concurrent workers often finish in the same second, so the filename is
+    claimed with O_EXCL and a short random suffix is used on collision —
+    otherwise two threads would fight over the same path on Windows.
+    """
     os.makedirs(dest_dir, exist_ok=True)
-    name = "%s-%s%s" % (prefix, time.strftime("%Y%m%d-%H%M%S"), ext)
-    path = os.path.join(dest_dir, name)
-    with open(path, "wb") as f:
-        f.write(blob)
+    stem = "%s-%s" % (prefix, time.strftime("%Y%m%d-%H%M%S"))
+    path = None
+    for attempt in range(50):
+        suffix = "" if attempt == 0 else "-%s" % uuid.uuid4().hex[:4]
+        candidate = os.path.join(dest_dir, stem + suffix + ext)
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(blob)
+        path = candidate
+        break
+    if path is None:
+        raise OSError("could not allocate a unique filename in %s" % dest_dir)
     if meta is not None:
         try:
             with open(path + ".json", "w", encoding="utf-8") as f:

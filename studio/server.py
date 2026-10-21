@@ -33,8 +33,15 @@ DEFAULT = {
     "base_url": api.DEFAULT_BASE,
     "api_key": "",
     "model": api.DEFAULT_MODEL,
+    "max_parallel": 3,
 }
 LOCK = threading.Lock()
+
+# ---------- 并发闸门 ----------
+# 上限只有两档：默认 3 路；页面里勾上「允许 5 路并发」才放开到 5 路。
+PARALLEL_CHOICES = (3, 5)
+PARALLEL_DEFAULT = 3
+MAX_WORKERS = max(PARALLEL_CHOICES)
 
 # ---------- 任务队列 ----------
 JOBS = {}
@@ -42,6 +49,59 @@ JOB_ORDER = []
 JOBS_LOCK = threading.Lock()
 TASK_Q = queue.Queue()
 MAX_JOBS = 40
+RECENT = {}  # 防抖：(mode, prompt, count, size, quality) -> (ts, job_id)
+
+
+class Gate:
+    """可随时改上限的并发闸门（信号量）。
+
+    worker 线程在开跑前 acquire()，跑完 release()。页面里切换勾选框时
+    调用 set_limit()，正在跑的任务不会被中断，只是新任务能不能进来变了。
+    """
+
+    def __init__(self, limit):
+        self._cond = threading.Condition()
+        self._limit = max(1, int(limit))
+        self._used = 0
+        self._waiting = 0
+
+    def acquire(self):
+        with self._cond:
+            self._waiting += 1
+            try:
+                while self._used >= self._limit:
+                    self._cond.wait()
+            finally:
+                self._waiting -= 1
+            self._used += 1
+
+    def release(self):
+        with self._cond:
+            if self._used > 0:
+                self._used -= 1
+            self._cond.notify()
+
+    def set_limit(self, limit):
+        with self._cond:
+            self._limit = max(1, int(limit))
+            self._cond.notify_all()
+            return self._limit
+
+    def snapshot(self):
+        with self._cond:
+            return {"limit": self._limit, "running": self._used, "waiting": self._waiting}
+
+
+GATE = Gate(PARALLEL_DEFAULT)
+
+
+def norm_parallel(value, fallback=PARALLEL_DEFAULT):
+    """只接受 3 / 5 两档，其他值夹到最近的合法档。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return min(PARALLEL_CHOICES, key=lambda c: (abs(c - n), c))
 
 
 def _job_public(job):
@@ -70,34 +130,43 @@ def worker_loop():
             if job is None:
                 TASK_Q.task_done()
                 continue
-            job["status"] = "running"
+        # 等一个并发名额；名额由页面上的勾选框决定（3 或 5）
+        GATE.acquire()
         try:
-            if payload["mode"] == "edit":
-                res = api.edit(payload["prompt"], payload["files"], payload["api_key"], **payload["opts"])
-            else:
-                res = api.generate(payload["prompt"], payload["api_key"], **payload["opts"])
-            meta = {
-                "type": payload["mode"], "prompt": payload["prompt"],
-                "size": payload["opts"].get("size"), "quality": payload["opts"].get("quality"),
-                "usage": res["usage"], "elapsed": res["elapsed"], "job": jid,
-                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            path = api.save(OUT_DIR, res["image"], res["ext"], payload["mode"], meta)
-            item = {"file": os.path.basename(path), "url": "/outputs/" + os.path.basename(path),
-                    "elapsed": res["elapsed"], "usage": res["usage"]}
-            with JOBS_LOCK:
-                job["items"].append(item)
-                job["done"] += 1
-        except Exception as e:  # noqa: BLE001
-            with JOBS_LOCK:
-                job["errors"].append("%s: %s" % (type(e).__name__, e))
-                job["failed"] += 1
-        finally:
             with JOBS_LOCK:
                 job = JOBS.get(jid)
-                if job and job["done"] + job["failed"] >= job["total"]:
-                    job["status"] = "failed" if (job["failed"] and not job["done"]) else "done"
-                    job["finished"] = time.time()
+                if job is None:
+                    continue
+                job["status"] = "running"
+            try:
+                if payload["mode"] == "edit":
+                    res = api.edit(payload["prompt"], payload["files"], payload["api_key"], **payload["opts"])
+                else:
+                    res = api.generate(payload["prompt"], payload["api_key"], **payload["opts"])
+                meta = {
+                    "type": payload["mode"], "prompt": payload["prompt"],
+                    "size": payload["opts"].get("size"), "quality": payload["opts"].get("quality"),
+                    "usage": res["usage"], "elapsed": res["elapsed"], "job": jid,
+                    "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                path = api.save(OUT_DIR, res["image"], res["ext"], payload["mode"], meta)
+                item = {"file": os.path.basename(path), "url": "/outputs/" + os.path.basename(path),
+                        "elapsed": res["elapsed"], "usage": res["usage"]}
+                with JOBS_LOCK:
+                    job["items"].append(item)
+                    job["done"] += 1
+            except Exception as e:  # noqa: BLE001
+                with JOBS_LOCK:
+                    job["errors"].append("%s: %s" % (type(e).__name__, e))
+                    job["failed"] += 1
+            finally:
+                with JOBS_LOCK:
+                    job = JOBS.get(jid)
+                    if job and job["done"] + job["failed"] >= job["total"]:
+                        job["status"] = "failed" if (job["failed"] and not job["done"]) else "done"
+                        job["finished"] = time.time()
+        finally:
+            GATE.release()
             TASK_Q.task_done()
 
 
@@ -109,6 +178,7 @@ def load_config():
                 cfg.update(json.load(f) or {})
         except Exception:
             pass
+    cfg["max_parallel"] = norm_parallel(cfg.get("max_parallel"), PARALLEL_DEFAULT)
     return cfg
 
 
@@ -148,7 +218,7 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GPTImage25Studio/1.0"
+    server_version = "GPTImage25Studio/1.1"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -201,12 +271,15 @@ class Handler(BaseHTTPRequestHandler):
                     "model": cfg["model"],
                     "has_key": bool(cfg["api_key"]),
                     "key_masked": mask(cfg["api_key"]),
+                    "max_parallel": cfg["max_parallel"],
+                    "parallel_choices": list(PARALLEL_CHOICES),
+                    "parallel": GATE.snapshot(),
                 }
             )
         elif path == "/api/history":
             self.send_json({"items": list_outputs()})
         elif path == "/api/jobs":
-            self.send_json({"jobs": list_jobs(), "pending": TASK_Q.qsize()})
+            self.send_json({"jobs": list_jobs(), "pending": TASK_Q.qsize(), "parallel": GATE.snapshot()})
         else:
             self.send_error(404)
 
@@ -224,6 +297,9 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["api_key"] = body["api_key"].strip()
                 if body.get("clear_key"):
                     cfg["api_key"] = ""
+                if "max_parallel" in body:
+                    cfg["max_parallel"] = norm_parallel(body.get("max_parallel"))
+                    GATE.set_limit(cfg["max_parallel"])
                 save_config(cfg)
                 return self.send_json({
                     "ok": True,
@@ -231,6 +307,9 @@ class Handler(BaseHTTPRequestHandler):
                     "model": cfg["model"],
                     "has_key": bool(cfg["api_key"]),
                     "key_masked": mask(cfg["api_key"]),
+                    "max_parallel": cfg["max_parallel"],
+                    "parallel_choices": list(PARALLEL_CHOICES),
+                    "parallel": GATE.snapshot(),
                 })
 
             if path == "/api/models":
@@ -280,8 +359,9 @@ class Handler(BaseHTTPRequestHandler):
         if not prompt:
             return self.send_json({"ok": False, "error": "prompt 不能为空"}, 200)
         mode = "edit" if body.get("mode") == "edit" else "generate"
+        limit = cfg["max_parallel"]
         try:
-            count = max(1, min(20, int(body.get("count") or 1)))
+            count = max(1, min(limit, int(body.get("count") or 1)))
         except (TypeError, ValueError):
             count = 1
         files = []
@@ -301,6 +381,21 @@ class Handler(BaseHTTPRequestHandler):
         )
         if mode == "edit":
             opts["input_fidelity"] = body.get("input_fidelity") or "high"
+
+        # 手抖点两次同一个按钮时，直接把刚才那批任务还回去，避免重复扣费。
+        now = time.time()
+        sig = (mode, prompt, count, opts["size"], opts["quality"], len(files))
+        with JOBS_LOCK:
+            for k in [k for k, v in RECENT.items() if now - v[0] > 10]:
+                RECENT.pop(k, None)
+            last = RECENT.get(sig)
+            if last and now - last[0] < 1.5:
+                prev = JOBS.get(last[1])
+                if prev is not None:
+                    return self.send_json({"ok": True, "job": _job_public(prev),
+                                           "queued": TASK_Q.qsize(), "deduped": True,
+                                           "count": prev["total"], "limit": limit})
+
         jid = uuid.uuid4().hex[:10]
         job = {"id": jid, "mode": mode, "prompt": prompt, "total": count, "done": 0, "failed": 0,
                "status": "queued", "size": opts["size"], "quality": opts["quality"],
@@ -308,12 +403,14 @@ class Handler(BaseHTTPRequestHandler):
         with JOBS_LOCK:
             JOBS[jid] = job
             JOB_ORDER.append(jid)
+            RECENT[sig] = (now, jid)
             while len(JOB_ORDER) > MAX_JOBS:
                 JOBS.pop(JOB_ORDER.pop(0), None)
         payload = {"mode": mode, "prompt": prompt, "api_key": cfg["api_key"], "opts": opts, "files": files}
         for _ in range(count):
             TASK_Q.put((jid, payload))
-        return self.send_json({"ok": True, "job": _job_public(job), "queued": TASK_Q.qsize()})
+        return self.send_json({"ok": True, "job": _job_public(job), "queued": TASK_Q.qsize(),
+                               "count": count, "limit": limit, "parallel": GATE.snapshot()})
 
     def handle_generate(self, body):
         cfg = load_config()
@@ -440,13 +537,18 @@ def main():
     ap.add_argument("--port", type=int, default=8756)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--open", action="store_true")
-    ap.add_argument("--workers", type=int, default=3, help="同时生成的任务数（默认 3）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="初始并发数（3 或 5，默认用 config.json 里的设置；页面里可随时改）")
     args = ap.parse_args()
 
     cfg = load_config()
     if not cfg["api_key"] and os.environ.get("APINEBULA_API_KEY"):
         cfg["api_key"] = os.environ["APINEBULA_API_KEY"]
         save_config(cfg)
+
+    if args.workers is not None:
+        cfg["max_parallel"] = norm_parallel(args.workers)
+    GATE.set_limit(cfg["max_parallel"])
 
     os.makedirs(OUT_DIR, exist_ok=True)
     srv = None
@@ -462,7 +564,7 @@ def main():
         print("启动失败：%s" % last_err)
         return
     srv.daemon_threads = True
-    for _ in range(max(1, args.workers)):
+    for _ in range(MAX_WORKERS):
         threading.Thread(target=worker_loop, daemon=True).start()
     url = "http://%s:%d/" % (args.host, args.port)
     print("=" * 52)
@@ -471,7 +573,7 @@ def main():
     print("=" * 52)
     print("输出目录: %s" % OUT_DIR)
     print("模型: %s @ %s" % (cfg["model"], cfg["base_url"]))
-    print("并发生成: %d 路队列" % max(1, args.workers))
+    print("并发生成: %d 路（页面里勾选可切到 5 路）" % GATE.snapshot()["limit"])
     print("关闭本窗口即停止服务。")
     if not cfg["api_key"]:
         print("提示: 尚未配置 API Key，请在页面右上角「设置」里填写。")

@@ -48,9 +48,53 @@
   .card > .hd h2{font-size:13px;margin:0;font-weight:600;color:var(--ink-2);letter-spacing:.02em}
   .pad{padding:14px}
 
-  .tabs{display:flex;gap:4px;background:var(--bg);padding:3px;border-radius:10px;margin-bottom:14px}
-  .tabs button{flex:1;border:0;background:transparent;padding:7px 0;border-radius:8px;font-size:13px;color:var(--ink-2)}
-  .tabs button.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .tabs{position:relative;display:flex;gap:4px;background:var(--bg);padding:3px;border-radius:10px;margin-bottom:10px}
+  .tabs button{position:relative;flex:1;border:0;background:transparent;padding:8px 0;border-radius:8px;font-size:13px;
+    color:var(--ink-2);display:flex;align-items:center;justify-content:center;gap:6px;
+    transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .08s ease}
+  .tabs button:active{transform:scale(.97)}
+  .tabs button.on{background:linear-gradient(180deg,#3a63ff,#2f5cff);color:#fff;font-weight:600;
+    box-shadow:0 4px 12px -6px rgba(47,92,255,.9)}
+  .tabs button.on[data-mode="edit"]{background:linear-gradient(180deg,#8b5cf6,#7c3aed);
+    box-shadow:0 4px 12px -6px rgba(124,58,237,.9)}
+  .tabnum{font-size:10.5px;line-height:1;padding:2px 5px;border-radius:999px;background:rgba(139,139,147,.16);
+    color:inherit;min-width:16px;text-align:center}
+  .tabs button.on .tabnum{background:rgba(255,255,255,.28)}
+  .tabs button.flash{animation:tabflash .55s ease}
+  @keyframes tabflash{0%{box-shadow:0 0 0 0 rgba(139,92,246,.45)}50%{box-shadow:0 0 0 5px rgba(139,92,246,.20)}
+    100%{box-shadow:0 0 0 0 rgba(139,92,246,0)}}
+
+  /* 当前模式提示条：切模式时闪一下，让「我点到编辑了」有明确回执 */
+  .modebar{display:flex;align-items:center;gap:8px;font-size:12px;padding:7px 10px;border-radius:9px;
+    margin-bottom:12px;background:var(--accent-soft);color:#2f4bd8;border:1px solid #dfe5ff;
+    transition:background .25s,color .25s,border-color .25s}
+  .modebar.edit{background:#f5f0ff;color:#6d28d9;border-color:#e7dbff}
+  .modebar .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto;
+    box-shadow:0 0 0 3px rgba(47,92,255,.14)}
+  .modebar.edit .dot{box-shadow:0 0 0 3px rgba(124,58,237,.16)}
+  .modebar.flash{animation:modeflash .75s ease}
+  @keyframes modeflash{
+    0%{transform:scale(.985);box-shadow:0 0 0 0 rgba(47,92,255,.30)}
+    45%{box-shadow:0 0 0 5px rgba(47,92,255,.14)}
+    100%{transform:none;box-shadow:0 0 0 0 rgba(47,92,255,0)}
+  }
+
+  /* 并发开关 */
+  .switchbox{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:10px;
+    padding:9px 11px;background:#fcfcfd;margin:-4px 0 14px;transition:border-color .18s,background .18s}
+  .switchbox:hover{border-color:#dcdce1}
+  .switchbox.on{border-color:#c7d2fe;background:#f8faff}
+  .switchbox .txt{font-size:12.5px;color:var(--ink-2);line-height:1.45}
+  .switchbox .txt b{color:var(--ink);font-weight:600}
+  .switchbox .txt small{display:block;color:var(--ink-3);font-size:11.5px}
+  .sw{position:relative;width:40px;height:22px;flex:0 0 auto}
+  .sw input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer;z-index:2}
+  .sw i{position:absolute;inset:0;border-radius:999px;background:#dcdce1;transition:background .2s}
+  .sw i:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.28);transition:transform .2s}
+  .sw input:checked + i{background:linear-gradient(180deg,#3a63ff,#2f5cff)}
+  .sw input:checked + i:after{transform:translateX(18px)}
+  .sw input:focus-visible + i{box-shadow:0 0 0 3px var(--accent-soft)}
 
   label.f{display:block;font-size:12px;color:var(--ink-3);margin:12px 0 6px;letter-spacing:.02em}
   label.f:first-child{margin-top:0}
@@ -71,11 +115,33 @@
   .ref button{position:absolute;top:3px;right:3px;width:18px;height:18px;border-radius:50%;border:0;
     background:rgba(0,0,0,.55);color:#fff;font-size:11px;line-height:1;display:grid;place-items:center;padding:0}
 
-  .primary{width:100%;margin-top:16px;border:0;border-radius:10px;padding:11px 0;font-size:14px;font-weight:600;
-    color:#fff;background:linear-gradient(180deg,#3a63ff,#2f5cff);box-shadow:0 6px 16px -8px rgba(47,92,255,.8)}
-  .primary:disabled{opacity:.55;cursor:not-allowed;box-shadow:none}
+  .primary{position:relative;width:100%;margin-top:16px;border:0;border-radius:10px;padding:11px 0;font-size:14px;
+    font-weight:600;color:#fff;background:linear-gradient(180deg,#3a63ff,#2f5cff);
+    box-shadow:0 6px 16px -8px rgba(47,92,255,.8);display:flex;align-items:center;justify-content:center;gap:8px;
+    transition:transform .08s ease,filter .15s ease,box-shadow .2s ease,background .2s ease}
+  .primary:disabled{opacity:.75;cursor:not-allowed;box-shadow:none}
   .primary:not(:disabled):hover{filter:brightness(1.05)}
-  .primary.sent{filter:brightness(1.15)}
+  .primary:not(:disabled):active{transform:scale(.985)}
+  .primary.edit{background:linear-gradient(180deg,#8b5cf6,#7c3aed);box-shadow:0 6px 16px -8px rgba(124,58,237,.85)}
+  .primary.busy{cursor:progress}
+  .primary.busy:disabled{opacity:1}
+  .primary.busy .label:after{content:"";display:inline-block;width:12px;height:12px;margin-left:8px;
+    vertical-align:-1px;border-radius:50%;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;
+    animation:spin .7s linear infinite}
+  .primary.ok{background:linear-gradient(180deg,#18a75e,#0f9d58)!important;
+    box-shadow:0 6px 16px -8px rgba(15,157,88,.9)!important}
+  .primary .kbd{font-size:11.5px;font-weight:400;opacity:.72}
+
+  /* 轻提示：提交、切模式、改并发都给一条明确回执 */
+  .toasts{position:fixed;top:66px;left:50%;transform:translateX(-50%);z-index:80;display:flex;
+    flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+  .toast{background:rgba(24,24,27,.93);color:#fff;font-size:12.5px;padding:9px 16px;border-radius:999px;
+    box-shadow:0 12px 30px -12px rgba(0,0,0,.55);animation:toastIn .22s ease;max-width:86vw}
+  .toast.ok{background:rgba(15,130,80,.96)}
+  .toast.warn{background:rgba(146,64,14,.96)}
+  .toast.out{animation:toastOut .25s ease forwards}
+  @keyframes toastIn{from{opacity:0;transform:translateY(-10px) scale(.96)}to{opacity:1;transform:none}}
+  @keyframes toastOut{to{opacity:0;transform:translateY(-8px) scale(.97)}}
   .hint{font-size:11.5px;color:var(--ink-3);margin-top:10px;line-height:1.6}
 
   .stage{min-height:520px;display:flex;flex-direction:column}
@@ -99,6 +165,9 @@
   .queue{padding:10px 14px;display:flex;flex-direction:column;gap:10px;max-height:270px;overflow:auto}
   .qempty{font-size:12.5px;color:var(--ink-3);padding:4px 0;line-height:1.7}
   .qitem{border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:#fcfcfd}
+  .qitem.new{border-color:#a9bbff;background:#f7f9ff;box-shadow:0 0 0 3px var(--accent-soft);
+    animation:jobIn .5s ease}
+  @keyframes jobIn{from{transform:translateY(-6px);opacity:.35}to{transform:none;opacity:1}}
   .qhead{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-2)}
   .qhead .qid{font-family:ui-monospace,Consolas,monospace;color:var(--ink-3)}
   .qhead .qstat{margin-left:auto;font-weight:600;color:var(--ink)}
@@ -137,6 +206,7 @@
   <h1>GPT Image Studio</h1>
   <select class="chip" id="modelSel" title="切换模型（一把 Auto Key 可切多个模型）"></select>
   <span class="chip" id="gateway">网关 …</span>
+  <span class="chip" id="parChip" title="当前并发上限（在左下「并发」开关里切换 3 / 5）">并发 <b>3</b></span>
   <div class="grow"></div>
   <button class="ghost" id="btnFolder">打开输出目录</button>
   <button class="ghost" id="btnSettings">设置</button>
@@ -145,10 +215,11 @@
 <main>
   <section class="card">
     <div class="pad">
-      <div class="tabs">
-        <button data-mode="generate" class="on">文生图</button>
-        <button data-mode="edit">参考图编辑</button>
+      <div class="tabs" id="tabs" role="tablist">
+        <button data-mode="generate" class="on" role="tab" aria-selected="true">文生图</button>
+        <button data-mode="edit" role="tab" aria-selected="false">参考图编辑 <span class="tabnum" id="refCount">0</span></button>
       </div>
+      <div class="modebar" id="modeBar"><span class="dot"></span><span id="modeText">当前模式：文生图 · 从提示词直接出图</span></div>
 
       <label class="f">提示词</label>
       <textarea id="prompt" placeholder="主体 + 场景 + 材质 + 光线 + 构图/比例。需要画面出现文字时用引号写清内容和位置。"></textarea>
@@ -220,13 +291,21 @@
 
       <label class="f">一次出几张 <span id="countVal" style="color:var(--ink);font-weight:600">1</span> 张
         <span style="color:var(--ink-3)">（会进队列，生成期间可继续提交）</span></label>
-      <input type="range" id="count" min="1" max="5" step="1" value="1"
-        style="width:100%;accent-color:var(--accent);margin-bottom:14px" />
+      <input type="range" id="count" min="1" max="3" step="1" value="1"
+        style="width:100%;accent-color:var(--accent);margin-bottom:12px" />
+
+      <div class="switchbox" id="parBox">
+        <label class="sw" title="勾选后放开到 5 张并发"><input type="checkbox" id="burst" /><i></i></label>
+        <div class="txt">允许 <b>5 张并发</b>
+          <small id="parHint">未勾选：最多 3 张同时跑（默认，更稳更省额度）</small>
+        </div>
+      </div>
+
       <script>document.getElementById("size").addEventListener("change", function(){
         document.getElementById("customSize").style.display = this.value === "custom" ? "block" : "none";
       });</script>
-      <button class="primary" id="run">生成 <span style="opacity:.7;font-weight:400">Ctrl+Enter</span></button>
-      <div class="hint">尺寸只决定比例，实际像素由模型决定（多数实现会量化到固定档位，常见约 1.5MP）。单次通常 20–45s，编辑更久。可以一次排队 1–5 张，同时提交多批。</div>
+      <button class="primary" id="run"><span class="label" id="runLabel">生成</span><span class="kbd" id="runHint">Ctrl+Enter</span></button>
+      <div class="hint">尺寸只决定比例，实际像素由模型决定（多数实现会量化到固定档位，常见约 1.5MP）。单次通常 20–45s，编辑更久。可以一次排队 1–3 张（勾上 5 张并发后到 1–5 张），同时提交多批。</div>
       <div class="err" id="err"></div>
     </div>
   </section>
@@ -250,6 +329,8 @@
     <div class="hist" id="hist"></div>
   </section>
 </main>
+
+<div class="toasts" id="toasts"></div>
 
 <div class="modal" id="modal">
   <div class="box">
@@ -278,7 +359,18 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const state = { mode: "generate", refs: [], current: null, busy: false, t0: 0 };
+const state = { mode: "generate", refs: [], current: null, busy: false, t0: 0, limit: 3, submitting: false };
+
+/* ---------- 轻提示 ---------- */
+function toast(msg, kind){
+  const box = $("#toasts");
+  if(!box) return;
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "");
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 260); }, 1900);
+}
 
 /* ---------- 模型切换 ---------- */
 async function refreshModelList(current){
@@ -305,11 +397,40 @@ async function loadConfig(){
   $("#cfgBase").value = r.base_url;
   $("#cfgModel").value = r.model;
   $("#cfgKey").placeholder = r.has_key ? ("当前：" + r.key_masked) : "粘贴你的 API Key";
+  applyParallel(r.max_parallel || 3);
   if(!r.has_key){
     showErr("还没有配置 API Key —— 在下面的设置里填一下就能开始。");
     $("#modal").classList.add("on");
   }
 }
+
+/* ---------- 并发上限（3 张 / 勾选 5 张） ---------- */
+function applyParallel(n){
+  const limit = (n === 5) ? 5 : 3;
+  state.limit = limit;
+  const slider = $("#count");
+  slider.max = String(limit);
+  if(parseInt(slider.value, 10) > limit) slider.value = String(limit);
+  $("#countVal").textContent = slider.value;
+  $("#burst").checked = limit === 5;
+  $("#parBox").classList.toggle("on", limit === 5);
+  $("#parHint").textContent = limit === 5
+    ? "已勾选：最多 5 张同时跑（更吃额度，注意网关限流）"
+    : "未勾选：最多 3 张同时跑（默认，更稳更省额度）";
+  $("#parChip").innerHTML = "并发 <b>" + limit + "</b>";
+}
+$("#burst").onchange = async () => {
+  const want = $("#burst").checked ? 5 : 3;
+  let got = want;
+  try{
+    const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ max_parallel: want })}).then(x => x.json());
+    if(r && r.max_parallel) got = r.max_parallel;
+  }catch(e){}
+  applyParallel(got);
+  toast(got === 5 ? "已放开到 5 张并发" : "已回到 3 张并发（默认）", got === 5 ? "warn" : "ok");
+};
+
 $("#presetOpenai").onclick = () => {
   $("#cfgBase").value = "https://api.openai.com/v1";
   $("#cfgModel").value = "gpt-image-2.5-flare";
@@ -347,13 +468,49 @@ $("#cfgSave").onclick = async () => {
 };
 
 /* ---------- 模式 ---------- */
+function setMode(mode, opts){
+  const editing = mode === "edit";
+  state.mode = mode;
+  document.querySelectorAll(".tabs button").forEach(x=>{
+    const on = x.dataset.mode === mode;
+    x.classList.toggle("on", on);
+    x.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  $("#refWrap").style.display = editing ? "block" : "none";
+
+  const bar = $("#modeBar");
+  bar.classList.toggle("edit", editing);
+  $("#modeText").textContent = editing
+    ? "当前模式：参考图编辑 · 会带上 " + state.refs.length + " 张参考图"
+    : "当前模式：文生图 · 从提示词直接出图";
+  bar.classList.remove("flash"); void bar.offsetWidth; bar.classList.add("flash");
+
+  const btn = $("#run");
+  if(!state.submitting){
+    btn.classList.toggle("edit", editing);
+    $("#runLabel").textContent = editing ? "编辑" : "生成";
+  }
+  syncPlaceholder();
+
+  if(editing){
+    const drop = $("#drop");
+    drop.classList.add("hot");
+    setTimeout(() => drop.classList.remove("hot"), 900);
+  }
+  if(opts && opts.announce){
+    toast(editing ? "已切换到「参考图编辑」" : "已切换到「文生图」", "info");
+  }
+}
 document.querySelectorAll(".tabs button").forEach(b=>{
   b.onclick = () => {
-    document.querySelectorAll(".tabs button").forEach(x=>x.classList.remove("on"));
-    b.classList.add("on"); state.mode = b.dataset.mode;
-    $("#refWrap").style.display = state.mode === "edit" ? "block" : "none";
-    $("#run").firstChild.textContent = state.mode === "edit" ? "编辑 " : "生成 ";
-    syncPlaceholder();
+    const target = b.dataset.mode;
+    if(state.mode === target){
+      // 又点了一下当前模式：明确告诉用户「已经在这个模式里」，不让他以为没点上
+      b.classList.remove("flash"); void b.offsetWidth; b.classList.add("flash");
+      toast("已经在「" + (target === "edit" ? "参考图编辑" : "文生图") + "」模式了", "warn");
+      return;
+    }
+    setMode(target, {announce: true});
   };
 });
 function syncPlaceholder(){
@@ -385,15 +542,28 @@ function addFiles(list){
 }
 function renderRefs(){
   $("#refs").innerHTML = state.refs.map((r,i)=>
-    `<div class="ref"><img src="${r.data}"><button data-i="${i}">×</button></div>`).join("");
+    `<div class="ref"><img src="${r.data}"><button data-i="${i}" title="移除这张">×</button></div>`).join("");
   $("#refs").querySelectorAll("button").forEach(b=>{
     b.onclick = () => { state.refs.splice(+b.dataset.i,1); renderRefs(); };
   });
+  $("#refCount").textContent = state.refs.length;
+  if(state.mode === "edit"){
+    $("#modeText").textContent = "当前模式：参考图编辑 · 会带上 " + state.refs.length + " 张参考图";
+  }
 }
 
 /* ---------- 生成 ---------- */
 function showErr(msg){ const e = $("#err"); e.textContent = msg; e.style.display = "block"; }
 function hideErr(){ $("#err").style.display = "none"; }
+
+function idleButton(){
+  const btn = $("#run");
+  btn.disabled = false;
+  btn.classList.remove("busy", "ok");
+  btn.classList.toggle("edit", state.mode === "edit");
+  $("#runLabel").textContent = state.mode === "edit" ? "编辑" : "生成";
+  $("#runHint").textContent = "Ctrl+Enter";
+}
 
 $("#run").onclick = run;
 document.addEventListener("keydown", e => {
@@ -401,9 +571,10 @@ document.addEventListener("keydown", e => {
 });
 
 async function run(){
+  if(state.submitting) return;  // 手抖连点：只认第一次
   const prompt = $("#prompt").value.trim();
-  if(!prompt){ showErr("提示词不能为空"); return; }
-  if(state.mode === "edit" && !state.refs.length){ showErr("参考图编辑至少要给一张图"); return; }
+  if(!prompt){ showErr("提示词不能为空"); toast("提示词不能为空", "warn"); return; }
+  if(state.mode === "edit" && !state.refs.length){ showErr("参考图编辑至少要给一张图"); toast("先加一张参考图", "warn"); return; }
 
   let size = $("#size").value;
   if(size === "custom"){
@@ -416,7 +587,7 @@ async function run(){
   const payload = {
     mode: state.mode,
     prompt,
-    count: parseInt($("#count").value, 10) || 1,
+    count: Math.min(parseInt($("#count").value, 10) || 1, state.limit),
     size,
     quality: $("#quality").value,
     background: $("#background").value || null,
@@ -426,16 +597,40 @@ async function run(){
     payload.images = state.refs;
     payload.input_fidelity = $("#fidelity").value;
   }
+
+  // 按钮立刻进入「提交中」：禁用 + 文案变化 + 转圈，避免以为没点上又点一次
+  state.submitting = true;
+  const btn = $("#run");
+  btn.disabled = true;
+  btn.classList.remove("ok");
+  btn.classList.add("busy");
+  $("#runLabel").textContent = "提交中…";
+  $("#runHint").textContent = "";
+
   try{
     const r = await fetch("/api/jobs", { method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify(payload) }).then(r => r.json());
-    if(!r.ok){ showErr(r.error || "提交失败"); return; }
-    const btn = $("#run");
-    btn.classList.add("sent");
-    setTimeout(() => btn.classList.remove("sent"), 350);
+    if(!r.ok){
+      showErr(r.error || "提交失败");
+      toast(r.error || "提交失败", "warn");
+      return;
+    }
+    const n = r.count || payload.count;
+    NEW_JOBS.add(r.job.id);
+    setTimeout(() => NEW_JOBS.delete(r.job.id), 1800);
+    btn.classList.remove("busy");
+    btn.classList.add("ok");
+    $("#runLabel").textContent = "✓ 已提交 " + n + " 张";
+    if(r.deduped) toast("这一批刚刚已经提交过了，已合并，没有重复下单", "warn");
+    else toast("已提交 " + n + " 张 · 并发上限 " + (r.limit || state.limit), "ok");
     await pollJobs();
     startPolling();
-  }catch(e){ showErr("请求异常：" + e.message); }
+  }catch(e){
+    showErr("请求异常：" + e.message);
+    toast("请求异常：" + e.message, "warn");
+  }finally{
+    setTimeout(() => { state.submitting = false; idleButton(); }, 1000);
+  }
 }
 
 $("#count").oninput = () => { $("#countVal").textContent = $("#count").value; };
@@ -443,6 +638,7 @@ $("#count").oninput = () => { $("#countVal").textContent = $("#count").value; };
 /* ---------- 队列轮询 ---------- */
 let pollTimer = null;
 const seen = new Set();
+const NEW_JOBS = new Set();
 const JOB_STATUS = { queued: "排队中", running: "生成中", done: "已完成", failed: "失败" };
 
 function startPolling(){ if(!pollTimer) pollTimer = setInterval(pollJobs, 900); }
@@ -452,6 +648,10 @@ async function pollJobs(){
   try{ data = await fetch("/api/jobs").then(r => r.json()); }catch(e){ return; }
   const jobs = data.jobs || [];
   renderQueue(jobs);
+  if(data.parallel){
+    $("#parChip").innerHTML = "并发 <b>" + data.parallel.limit + "</b>" +
+      (data.parallel.running ? " · 跑 <b>" + data.parallel.running + "</b>" : "");
+  }
   let fresh = null;
   jobs.forEach(j => (j.items || []).forEach(it => {
     if(!seen.has(it.url)){ seen.add(it.url); fresh = it; }
@@ -479,8 +679,9 @@ function renderQueue(jobs){
       `<img class="qthumb" src="${it.url}" data-url="${it.url}" title="${it.file}">`).join("");
     const err = (j.errors || []).length ? `<div class="qerr">${esc(j.errors[0])}</div>` : "";
     const color = j.status === "failed" ? "color:#b91c1c" : "";
-    return `<div class="qitem">
-      <div class="qhead"><span class="qid">${j.id}</span>
+    const badge = j.mode === "edit" ? '<span class="badge" style="background:#f5f0ff;border-color:#e7dbff;color:#6d28d9">编辑</span>' : "";
+    return `<div class="qitem${NEW_JOBS.has(j.id) ? " new" : ""}">
+      <div class="qhead"><span class="qid">${j.id}</span>${badge}
         <span>${j.total} 张 · ${esc(j.size)} · ${esc(j.quality)}</span>
         <span class="qstat" style="${color}">${JOB_STATUS[j.status] || j.status} ${j.done}/${j.total}</span></div>
       <div class="qbar"><i style="width:${pct}%"></i></div>
