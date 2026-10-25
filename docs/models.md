@@ -1,0 +1,172 @@
+# 模型与参数说明
+
+这份文档解释**每个模型选项到底是什么**、**哪些参数真的会生效**、以及**同一族模型之间靠什么切换**。
+界面左上角有两套接口，规则完全不同，先看这一张表：
+
+| | GPT Image | Nano Banana |
+|---|---|---|
+| 接口 | OpenAI Images API：`/images/generations`、`/images/edits` | OpenAI 兼容的 Chat 接口：`/chat/completions`（`modalities: ["text","image"]`） |
+| 模式 | 文生图 / 参考图编辑 两个页签 | 只有一个面板，参考图可选 |
+| 参考图 | 编辑模式必填，走 `multipart` 的 `image` 字段 | 作为多模态消息一起发，可有可无 |
+| 出图数量 | 一次请求一张（`n` 不传） | 一次请求一张，多张 = 多路并发 |
+| 画幅 | `size` 参数 | 只能写进提示词 |
+| 质量 / 背景 / 返回格式 | 有 | 没有这些参数 |
+| 计费 | 按 token（网关折算成按次价） | 按次 |
+
+---
+
+## 一、GPT Image
+
+### 1. `gpt-image-2`：只有一个模型
+
+`model` 字段就写 `gpt-image-2`，没有别的变体。切不了「快档 / 质档」，也没有 `xhigh`、`max` 质量档。
+
+| 参数 | 取值 | 说明 |
+|---|---|---|
+| `quality` | `low` / `medium` / `high` / `auto` | 上限就是 `high` |
+| `size` | `auto` 或 `宽x高` | 只决定比例，实际像素由模型量化 |
+| `background` | 不传 / `opaque` / `transparent` | 透明背景要配 PNG 输出 |
+| `response_format` | `url` / `b64_json` | 多数网关 `url` 更快 |
+| `input_fidelity` | `high` / `low` | 仅编辑接口；高=尽量不动原图 |
+
+### 2. `gpt-image-2.5`：两个模型，靠 `model` 字段切换
+
+2.5 在 API 层面是**两个独立的模型 ID**，不是同一个模型的两个档位：
+
+| 模型 ID | 定位 | 适合 | 质量档 |
+|---|---|---|---|
+| `gpt-image-2.5-flare` | 快档，OpenAI 默认 | 批量出图、试构图、产品内嵌生图 | `low` `medium` `high` `xhigh` `max` `auto` |
+| `gpt-image-2.5-sunburst` | 质档，更慢 | 广告级成品、精修产品图、多轮编辑 | 同上 |
+
+**切换方式只有一个：改请求里的 `model` 字段。** 没有 `variant`、`mode`、`tier` 之类的参数，
+两个 ID 共用同一套参数、同一个端点、同一把 Key，改一个字符串就完成切换。
+
+除此之外，2.5 相比 2 只多了一件事：**多两个质量档** `xhigh` 和 `max`（花更多输出 token 换细节）。
+尺寸、背景、返回格式、编辑接口的用法完全一致。
+
+> **界面里为什么有时只看到一个 `gpt-image-2.5`？**
+> 模型列表是从网关的 `/v1/models` 拉的，软件不编造模型名。不少中转会把两个 2.5 模型合并成一个
+> `gpt-image-2.5` 入口，由它自己在后端分流 —— 这种情况下列表里就只有一项，也没有价格差异。
+> 想按 Flare / Sunburst 分开选，需要用在 `/v1/models` 里明确列了这两个 ID（或至少 `-flare`）的网关。
+> 直接手填 `gpt-image-2.5-flare` 而网关没给你开，会返回 `403 该令牌无权访问模型`。
+
+**实践建议**：先用 Flare 跑构图，定下来之后把**同一条提示词**丢给 Sunburst + `high` 再出一张，
+只比较画质，不要同时改提示词。
+
+### 3. 质量档到底差在哪
+
+| `quality` | 行为 |
+|---|---|
+| `low` | 最少 token，构图和文字容易崩，适合试比例 |
+| `medium` | 均衡，日常够用 |
+| `high` | 细节、小字、材质更稳（默认） |
+| `xhigh` / `max` | **只有 2.5 认**；每张消耗更多输出 token，2 用了会直接报 `400 不合法的quality` |
+
+### 4. 尺寸：`size` 只决定比例
+
+`size` 不是精确像素，模型会把输出量化到固定档位：常见约 1.5MP，所以 `1024x1024` 实际可能拿到
+`1254x1254`，`2048x2048` 也可能还是 `1254x1254` —— 那是**网关分组**的上限（例如分组名 `gpt-image-2-1K`
+就只出 1K），不是软件没传。判断真实尺寸请看图片文件本身，不要相信响应里的 `size` 回显。
+
+### 5. 参考图编辑
+
+- 最多 16 张，**顺序有意义**：第一张是主体，后面的是风格/服装/背景参考
+- 走 `/images/edits`，`multipart/form-data`，字段名 `image`（重复出现）
+- 每张参考图按输入 token 计费，图越多越贵
+- `input_fidelity=high` 会尽量保留原图结构；想让它自由重画用 `low`
+
+---
+
+## 二、Nano Banana（Gemini 图像模型）
+
+### 1. 它不是 Images API
+
+Gemini 图像模型在这类网关上走的是 **Chat 接口**：
+
+```
+POST /v1/chat/completions
+{ "model": "gemini-3.1-flash-image",
+  "messages": [{"role":"user","content":[{"type":"text","text":"..."},
+                                         {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}],
+  "modalities": ["text","image"] }
+```
+
+返回的图片藏在 `choices[0].message.content` 里，是一段 markdown：
+`![image](data:image/jpeg;base64,...)`。工作台会自动把它抠出来、存成文件。
+
+因为是对话式接口，**「文生图」和「参考图编辑」在这里是同一件事**：给不给参考图而已。
+所以切到 Nano Banana 后没有两个页签，参考图区域一直可见（可选）。
+
+### 2. 模型怎么选
+
+界面里每个模型名后面的 `¥x.xx/次` 是参考价（按服务商公开定价页折算，**仅展示**）。
+
+| 模型 | 定位 | 参考价 | 什么时候用 |
+|---|---|---|---|
+| `gemini-nano-banana-2.1` | 均衡，第一代命名 | ¥0.18/次 | 日常文生图、风格图 |
+| `gemini-3.1-flash-image` | 快、便宜 | ¥0.18/次 | 默认；批量、试稿 |
+| `gemini-3.1-flash-image-preview` | 预览版，能力可能更新但会变 | ¥0.181/次 | 想尝鲜新特性 |
+| `gemini-3-pro-image-preview` | 画质最高、最慢最贵 | ¥0.288/次 | 成品图、复杂编辑、文字排版 |
+
+预览版（`-preview`）稳定性不如正式版，线上批次别用它。
+
+### 3. 只有这几个参数是真的
+
+| 界面控件 | 实际作用 |
+|---|---|
+| 提示词 | 唯一决定画面的输入；编辑时写清「改什么 + 保留什么」 |
+| 参考图（可选） | 作为多模态内容一起发；第一张是主体，最多 14 张 |
+| 画幅比例 | **不是参数**，见下 |
+| 一次出几张 | 并行发 N 次请求，每张都单独计费 |
+
+没有 `quality`、`background`、`response_format`、`input_fidelity` —— 传了也会被忽略。
+
+### 4. 画幅比例靠提示词
+
+Gemini 官方 API 有 `imageConfig.aspectRatio`，但**很多中转不透传**（实测某个网关里
+`image_config`、`aspect_ratio`、`size` 三种写法都被丢掉了，输出恒为 1408×768）。
+能稳定生效的只有提示词，所以工作台的做法是：
+
+> 你选 `9:16`，提交时会在提示词末尾追加一句「画面比例 9:16，竖版构图，按此比例出图。」
+
+实测同样一句「橘猫」：加「1:1 正方形」→ 输出 1024×1024；加「9:16 竖版」→ 输出 768×1376。
+你在提示词里自己写清楚比例，效果一样，界面上的选择器只是省事。
+
+### 5. 一次一张
+
+Chat 接口一次只回一张图。想同时出 3 张，就是把同一个请求发 3 次（工作台的「一次出几张」），
+按 3 次计费。并发上限 3 / 5 见左下角开关。
+
+---
+
+## 三、`config.json`
+
+两套接口的地址、Key、模型分开存，切换界面不会互相覆盖：
+
+```json
+{
+  "provider": "gpt",
+  "max_parallel": 3,
+  "gpt":  { "base_url": "https://api.openai.com/v1", "api_key": "sk-...", "model": "gpt-image-2.5-flare" },
+  "nano": { "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key": "AIza...", "model": "gemini-3.1-flash-image" },
+  "prices": { "gemini-3.1-flash-image": 0.18 }
+}
+```
+
+- `prices` 用来覆盖界面上的参考价（元/次），只影响显示，不影响计费
+- 旧版平铺的 `{base_url, api_key, model}` 会在启动时自动迁移进 `gpt`
+- 这个文件在 `.gitignore` 里，不会进仓库
+
+---
+
+## 四、常见报错
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `403 该令牌无权访问模型 xxx` | 网关没给这把 Key 开这个模型（常见于直填 `-flare` / `-sunburst`） |
+| `400 不合法的quality` | 用了 `xhigh` / `max` 但模型不是 2.5，或网关只支持到 `high` |
+| 选了 2048 还是 1254×1254 | 网关是 1K 分组，换分组或换网关 |
+| Nano 出来的比例不对 | 网关忽略了 `image_config`，用提示词写比例 |
+| Nano 返回 200 但没有图 | 模型只回了文字。看 `outputs/*.json` 里的 `note`，或重试一次 |
+| 返回的 `url` 打不开（403） | 部分 CDN 校验 UA，工作台下载时已带浏览器 UA；仍失败就换 `b64_json` |

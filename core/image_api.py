@@ -1,10 +1,14 @@
 """Minimal, dependency-free client for OpenAI-compatible image APIs.
 
-Works with the official OpenAI Images API as well as any third-party gateway
-that speaks the same wire format:
+Two wire formats are supported, both with the standard library only:
 
-  POST {base_url}/images/generations   -> text to image
-  POST {base_url}/images/edits         -> image editing (multipart)
+  GPT Image / any OpenAI-compatible gateway
+    POST {base_url}/images/generations   -> text to image
+    POST {base_url}/images/edits         -> image editing (multipart)
+
+  Gemini image models ("Nano Banana") over the OpenAI-compatible chat route
+    POST {base_url}/chat/completions     -> text + reference images in, image out
+    (the gateway answers with a markdown data-URL inside message.content)
 
 Only the Python standard library is used, so this module runs unchanged under
 the official CPython, the Windows embeddable distribution, or the interpreter
@@ -15,6 +19,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import ssl
 import time
 import urllib.error
@@ -23,6 +28,14 @@ import uuid
 
 DEFAULT_BASE = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-image-2.5-flare"
+DEFAULT_NANO_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
+DEFAULT_NANO_MODEL = "gemini-3.1-flash-image"
+
+# ![image](data:image/jpeg;base64,...)  —— 网关把结果塞在 assistant 文本里
+_MD_IMG = re.compile(
+    r"!\[[^\]]*\]\(\s*(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+|https?://[^)\s]+)\s*\)"
+)
+_DATA_IMG = re.compile(r"data:image/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)")
 
 
 class APIError(Exception):
@@ -54,6 +67,8 @@ def _post(url, data, headers, timeout):
         raise APIError(e.code, body) from None
     except urllib.error.URLError as e:
         raise APIError(0, "network error: %s" % (e.reason,)) from None
+    except json.JSONDecodeError as e:
+        raise APIError(0, "response is not JSON: %s" % e) from None
 
 
 def _multipart(fields, files):
@@ -96,6 +111,18 @@ def _download(url, timeout=120, retries=2):
     raise APIError(0, "download failed after %d tries: %s" % (retries + 1, last))
 
 
+def sniff_ext(blob):
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if blob[:2] == b"\xff\xd8":
+        return ".jpg"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    return ".png"
+
+
 def _extract(resp):
     """Return (image_bytes, extension) for either b64_json or url responses."""
     item = (resp.get("data") or [{}])[0]
@@ -105,15 +132,7 @@ def _extract(resp):
         blob = _download(item["url"])
     else:
         raise APIError(0, "response contains neither b64_json nor url: %s" % str(resp)[:300])
-    if blob[:8] == b"\x89PNG\r\n\x1a\n":
-        ext = ".png"
-    elif blob[:2] == b"\xff\xd8":
-        ext = ".jpg"
-    elif blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
-        ext = ".webp"
-    else:
-        ext = ".png"
-    return blob, ext
+    return blob, sniff_ext(blob)
 
 
 def list_models(base_url=DEFAULT_BASE, api_key="", timeout=30):
@@ -205,6 +224,107 @@ def edit(prompt, images, api_key, base_url=DEFAULT_BASE, model=DEFAULT_MODEL, si
         "ext": ext,
         "usage": resp.get("usage") or {},
         "elapsed": round(time.time() - started, 2),
+        "raw": resp,
+    }
+
+
+# ---------------------------------------------------------------- Nano Banana
+def _data_url(blob, filename="ref.png"):
+    mime = mimetypes.guess_type(filename or "ref.png")[0] or "image/png"
+    return "data:%s;base64,%s" % (mime, base64.b64encode(blob).decode("ascii"))
+
+
+def _b64_blob(s):
+    return base64.b64decode("".join(s.split()))
+
+
+def _from_url(url, timeout=120):
+    if url.startswith("data:"):
+        return _b64_blob(url.split(",", 1)[1])
+    return _download(url, timeout=timeout)
+
+
+def _text_of(content):
+    """Flatten an OpenAI chat `content` (string or part list) into plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(p.get("text") or "" for p in content if isinstance(p, dict))
+    return ""
+
+
+def _images_of(content, timeout=120):
+    """Pull every image out of an assistant message (data URLs, links, parts)."""
+    found = []
+    if isinstance(content, str) or content is None:
+        text = content or ""
+    else:
+        text = _text_of(content)
+        for p in content if isinstance(content, list) else []:
+            if not isinstance(p, dict):
+                continue
+            url = (p.get("image_url") or {}).get("url") if isinstance(p.get("image_url"), dict) else p.get("image_url")
+            if isinstance(url, str) and (url.startswith("data:") or url.startswith("http")):
+                found.append(_from_url(url, timeout))
+            inline = p.get("inline_data") or p.get("inlineData")
+            if isinstance(inline, dict) and inline.get("data"):
+                found.append(_b64_blob(inline["data"]))
+    if text:
+        for m in _MD_IMG.finditer(text):
+            found.append(_from_url(m.group(1), timeout))
+        if not found:
+            for m in _DATA_IMG.finditer(text):
+                found.append(_b64_blob(m.group(2)))
+    return found
+
+
+def nano_chat(prompt, images=(), api_key="", base_url=DEFAULT_NANO_BASE,
+              model=DEFAULT_NANO_MODEL, aspect=None, timeout=300):
+    """Generate or edit through a Gemini image model on the chat route.
+
+    images: [(filename, bytes), ...] — optional, sent as multimodal content.
+    aspect: kept for the record only; these models read the ratio from the
+            prompt text, and most gateways drop image_config/aspect_ratio.
+
+    Returns dict with image / ext / usage / elapsed / text / raw. `text` is
+    whatever the model wrote next to the picture (often empty).
+    """
+    started = time.time()
+    parts = [{"type": "text", "text": prompt}]
+    for i, (filename, blob) in enumerate(images or []):
+        parts.append({"type": "image_url",
+                      "image_url": {"url": _data_url(blob, filename or ("ref%d.png" % i))}})
+    body = {
+        "model": model or DEFAULT_NANO_MODEL,
+        "messages": [{"role": "user", "content": parts}],
+        "modalities": ["text", "image"],
+    }
+    resp = _post(
+        (base_url or DEFAULT_NANO_BASE).rstrip("/") + "/chat/completions",
+        json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        timeout,
+    )
+    blobs = []
+    choices = resp.get("choices") or []
+    msg = (choices[0].get("message") if choices else {}) or {}
+    blobs.extend(_images_of(msg.get("content"), timeout))
+    extra = msg.get("images")
+    if isinstance(extra, list) and extra:
+        blobs.extend(_images_of(extra, timeout))
+    if not blobs and resp.get("data"):  # some gateways answer in Images format
+        blobs.append(_from_url((resp["data"][0] or {}).get("url") or
+                               "data:%s" % (resp["data"][0] or {}).get("b64_json", ""), timeout))
+    if not blobs:
+        raise APIError(0, "no image in the reply: %s" % str(resp)[:400])
+    note = _text_of(msg.get("content")).strip()
+    note = _MD_IMG.sub("", note).strip()
+    return {
+        "image": blobs[0],
+        "ext": sniff_ext(blobs[0]),
+        "usage": resp.get("usage") or {},
+        "elapsed": round(time.time() - started, 2),
+        "text": note,
         "raw": resp,
     }
 

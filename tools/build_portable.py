@@ -64,10 +64,18 @@ README = """{title}
      API Key   你的密钥
    保存后就能生图：写提示词，Ctrl+Enter。
 
+【两套接口】
+- 左上角「GPT Image / Nano Banana」切换，两套的地址、Key、模型分开保存
+- GPT Image：OpenAI 的 Images 接口，文生图 + 参考图编辑
+- Nano Banana：Gemini 图像模型，走 chat/completions，参考图可选，画幅写在提示词里
+- 详细的模型差异与参数说明见 app\\docs\\models.md
+
 【说明】
 - 整个文件夹可以随意移动、拷到 U 盘、换电脑用，目标机不需要装 Python
-- 顶栏可以切换模型；尺寸支持预设比例和自定义宽高
-- 「一次出几张」默认最多 3 张；勾上左下「允许 5 张并发」才放开到 5 张（即时生效，不用重启）
+- 模型下拉会列出网关实际提供的模型，有价格的会显示 ¥x.xx/次
+- 图片拖进窗口任意位置即可当参考图，文生图模式下会自动切到「参考图编辑」
+- 画布右边是最近 10 张，点一下来回对比；底部历史（最近 60 张）默认折叠
+- 「一次出几张」默认最多 3 张；勾上左下「允许 5 张并发」才放开到 5 张（即时生效）
 - 生成期间可以继续改参数提交，新任务进队列，不会打断前面的
 - 提交按钮会变成「提交中…」再变成「✓ 已提交」；误点两次也只会算一单
 - 图片存在 app\\outputs\\，同名 .json 记录了提示词和参数
@@ -78,6 +86,7 @@ README = """{title}
   runtime\\        内置 Python 运行时（别删）
   app\\studio\\     工作台服务与页面
   app\\core\\       接口客户端（可单独拿去用）
+  app\\docs\\       模型与参数说明
   app\\outputs\\    生成结果
 
 【许可】MIT
@@ -89,9 +98,13 @@ def copy_app(dst):
     os.makedirs(os.path.join(app, "studio"))
     os.makedirs(os.path.join(app, "core"))
     os.makedirs(os.path.join(app, "outputs"))
+    os.makedirs(os.path.join(app, "docs"), exist_ok=True)
     for name in ("server.py", "index.html"):
         shutil.copy(os.path.join(ROOT, "studio", name), os.path.join(app, "studio", name))
     shutil.copy(os.path.join(ROOT, "core", "image_api.py"), os.path.join(app, "core", "image_api.py"))
+    models_doc = os.path.join(ROOT, "docs", "models.md")
+    if os.path.isfile(models_doc):
+        shutil.copy(models_doc, os.path.join(app, "docs", "models.md"))
     with open(os.path.join(app, "outputs", "README.txt"), "w", encoding="utf-8") as f:
         f.write("生成的图片保存在这里。\n")
     # 不在包里放任何 config.json：首次运行由设置面板生成
