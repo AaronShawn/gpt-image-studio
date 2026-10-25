@@ -294,6 +294,19 @@
   .modal .box .ft button{border:0;border-radius:9px;padding:8px 16px;font-size:13px}
   .modal .box .ft .ok{background:var(--accent);color:#fff;font-weight:600}
   .modal .box .ft .no{background:var(--bg);border:1px solid var(--line);color:var(--ink-2)}
+  .modal .box.wide{width:min(600px,100%)}
+
+  /* 价格表 */
+  .pricelist{max-height:44vh;overflow:auto;margin:10px 0 6px;border-top:1px solid var(--line-2)}
+  .pmodel{display:grid;grid-template-columns:minmax(0,1fr) 92px 44px;gap:8px;align-items:center;
+    padding:7px 2px;border-bottom:1px solid var(--line-2);cursor:text}
+  .pmodel .name{min-width:0;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .pmodel .name b{display:block;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pmodel .name small{display:block;color:var(--ink-3);font-size:10.5px;margin-top:1px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}
+  .pmodel input{width:100%;padding:5px 8px;font-size:12.5px;text-align:right}
+  .pmodel .unit{font-size:11.5px;color:var(--ink-3)}
+  .pricelist .plempty{font-size:12px;color:var(--ink-3);line-height:1.7;padding:12px 2px}
   .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:9px;padding:9px 11px;
     font-size:12px;margin-top:12px;word-break:break-all;display:none}
   code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
@@ -497,13 +510,28 @@
       <datalist id="modelList"></datalist>
       <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
         <button class="ghost" id="pullModels" style="padding:4px 10px;font-size:12px">拉取模型列表</button>
-        <span id="modelHint" style="font-size:11.5px;color:var(--ink-3)">填好地址和 Key 后点一下，从列表里选</span>
+        <button class="ghost" id="openPrices" style="padding:4px 10px;font-size:12px">模型价格…</button>
       </div>
+      <div id="modelHint" style="font-size:11.5px;color:var(--ink-3);margin-top:5px">填好地址和 Key 后点一下，从列表里选</div>
       <label class="f">API Key</label>
       <input type="password" id="cfgKey" placeholder="留空表示不修改当前 Key" />
       <div class="hint" id="cfgHint">Key 只写进本机 <code>config.json</code>，仅服务端读取，不出现在页面或源码里。<br />两个接口各自的地址和 Key 分开保存，切到哪个就在哪个下面填。</div>
     </div>
     <div class="ft"><button class="no" id="cfgCancel">取消</button><button class="ok" id="cfgSave">保存</button></div>
+  </div>
+</div>
+
+<div class="modal" id="priceModal">
+  <div class="box wide">
+    <h3>模型价格 <span class="badge" id="priceWho">GPT Image</span></h3>
+    <div class="bd">
+      <div class="hint" id="priceIntro" style="margin-top:0">
+        价格只影响界面上的「约 ¥x」和提交前的估算，<b>不参与计费</b>。留空就是「价格未知」。
+      </div>
+      <div class="pricelist" id="priceRows"></div>
+      <div class="hint">拉取模型列表时会自动删掉已下架模型的价格；新加的模型没填就显示「未设」。</div>
+    </div>
+    <div class="ft"><button class="no" id="priceCancel">取消</button><button class="ok" id="priceSave">保存</button></div>
   </div>
 </div>
 
@@ -545,6 +573,8 @@ const state = {
   model: { gpt: "", nano: "" },
   hasKey: { gpt: false, nano: false },
   prices: {},
+  pricesCustom: {},
+  pricesBuiltin: {},
   history: [],
 };
 
@@ -592,6 +622,11 @@ async function ensureModels(p, force){
     const r = await post("/api/models", { provider: p });
     if(r.ok){
       state.models[p] = r.models || [];
+      if(r.prices){ state.prices = r.prices; state.pricesCustom = r.prices_custom || {}; }
+      const dropped = r.dropped_prices || [];
+      if(dropped.length){
+        toast("已自动清理 " + dropped.length + " 个下架模型的价格", "warn");
+      }
       const next = pickDefaultModel(p);
       if(next && next !== state.model[p]){
         state.model[p] = next;
@@ -634,8 +669,9 @@ function renderPicker(){
     }
   }
   html += `<div class="mfoot"><button id="miRefresh">↻ 重新拉取</button>
+      <button id="miPrices">价格…</button>
       <button id="miSettings">设置</button>
-      <span>价格按服务商定价页填写，仅供参考</span></div>`;
+      <span>价格可自定义，仅用于显示</span></div>`;
   $("#modelMenu").innerHTML = html;
 
   $$("#modelMenu .mi").forEach(b => b.onclick = () => {
@@ -651,6 +687,7 @@ function renderPicker(){
     toast(state.models[state.provider].length ? "模型列表已更新" : "没拉到模型，检查地址和 Key", "warn");
   };
   $("#miSettings").onclick = () => { toggleMenu(false); openSettings(); };
+  $("#miPrices").onclick = () => { toggleMenu(false); openPrices(); };
 }
 
 function toggleMenu(on){
@@ -685,6 +722,8 @@ async function loadConfig(){
   catch(e){ showErr("读不到服务端配置，确认 python studio/server.py 还在跑"); return; }
   state.provider = cfg.provider === "nano" ? "nano" : "gpt";
   state.prices = cfg.prices || {};
+  state.pricesCustom = cfg.prices_custom || {};
+  state.pricesBuiltin = cfg.prices_builtin || {};
   state.base = {};
   ["gpt", "nano"].forEach(p => {
     const c = cfg.providers[p];
@@ -696,6 +735,13 @@ async function loadConfig(){
   applyProviderUI();
   renderPicker();
   await Promise.all([ensureModels("gpt"), ensureModels("nano")]);
+  // 两套模型是并发拉的，价格清理可能互相覆盖成旧值，最后再对齐一次
+  try{
+    const fresh = await get("/api/config");
+    state.prices = fresh.prices || state.prices;
+    state.pricesCustom = fresh.prices_custom || state.pricesCustom;
+    state.pricesBuiltin = fresh.prices_builtin || state.pricesBuiltin;
+  }catch(e){}
   applyProviderUI(); renderPicker(); renderHeader(); renderQuality(); renderCountHint();
   if(!state.hasKey.gpt && !state.hasKey.nano){
     showErr("还没有配置 API Key —— 在右上角「设置」里填一下就能开始。");
@@ -1032,7 +1078,7 @@ $("#count").oninput = () => { $("#countVal").textContent = $("#count").value; re
 $("#run").onclick = run;
 document.addEventListener("keydown", (e) => {
   if((e.ctrlKey || e.metaKey) && e.key === "Enter"){ e.preventDefault(); run(); }
-  if(e.key === "Escape"){ toggleMenu(false); $("#modal").classList.remove("on"); }
+  if(e.key === "Escape"){ toggleMenu(false); $("#modal").classList.remove("on"); $("#priceModal").classList.remove("on"); }
 });
 
 async function run(){
@@ -1346,6 +1392,61 @@ function openSettings(){
 }
 $("#btnSettings").onclick = openSettings;
 $("#cfgCancel").onclick = () => $("#modal").classList.remove("on");
+
+/* ---------- 模型价格 ---------- */
+function openPrices(){
+  const p = state.provider;
+  $("#priceWho").textContent = PROVIDER_LABEL[p];
+  const list = state.models[p] || [];
+  if(!list.length){
+    $("#priceRows").innerHTML = `<div class="plempty">还没拉到模型列表。<br>先在上面「设置」里填好地址和 Key，点「拉取模型列表」，这里就会出现每个模型的价格输入框。</div>`;
+  }else{
+    $("#priceRows").innerHTML = list.map(m => {
+      const cur = state.pricesCustom[m.id];
+      const def = state.pricesBuiltin[m.id];
+      let note;
+      if(cur != null){
+        note = def != null ? `<small>内置 ${yuan(def)}/次 · 已自定义</small>` : `<small>已自定义</small>`;
+      }else if(def != null){
+        note = `<small>内置 ${yuan(def)}/次</small>`;
+      }else{
+        note = m.image ? `<small>未设价格</small>` : `<small>非图像模型</small>`;
+      }
+      return `<label class="pmodel">
+        <span class="name"><b title="${esc(m.id)}">${esc(m.id)}</b>${note}</span>
+        <input type="number" min="0" step="0.001" inputmode="decimal" data-id="${esc(m.id)}"
+          value="${cur != null ? cur : ""}" placeholder="${def != null ? def : "未设"}" />
+        <span class="unit">元/次</span>
+      </label>`;
+    }).join("");
+  }
+  $("#modal").classList.remove("on");
+  $("#priceModal").classList.add("on");
+}
+$("#openPrices").onclick = openPrices;
+$("#priceCancel").onclick = () => $("#priceModal").classList.remove("on");
+$("#priceSave").onclick = async () => {
+  const inputs = $$("#priceRows input");
+  if(!inputs.length){ toast("没有可保存的模型，先拉取模型列表", "warn"); return; }
+  const prices = {};
+  inputs.forEach(inp => {
+    const raw = inp.value.trim();
+    const n = Number(raw);
+    if(raw !== "" && isFinite(n) && n > 0) prices[inp.dataset.id] = n;
+  });
+  const r = await post("/api/prices", { provider: state.provider, prices });
+  if(r && r.ok){
+    state.prices = r.prices || {};
+    state.pricesCustom = r.prices_custom || {};
+    $("#priceModal").classList.remove("on");
+    renderPicker(); renderCountHint();
+    const n = Object.keys(prices).length;
+    toast(n ? ("价格已保存：" + n + " 个模型") : "价格已清空（都按未知显示）", "ok");
+  }else{
+    toast("保存失败，看下控制台", "warn");
+  }
+};
+
 $("#presetOfficial").onclick = () => {
   $("#cfgBase").value = OFFICIAL[state.provider].base;
   $("#cfgModel").value = OFFICIAL[state.provider].model;
@@ -1392,6 +1493,7 @@ $("#cfgSave").onclick = async () => {
     state.base[state.provider] = c.base_url;
     state.model[state.provider] = c.model;
     state.hasKey[state.provider] = c.has_key;
+    if(r.prices){ state.prices = r.prices; state.pricesCustom = r.prices_custom || {}; }
   }
   $("#modal").classList.remove("on");
   $("#cfgKey").value = "";

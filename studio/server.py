@@ -78,6 +78,7 @@ RECENT = {}  # 防抖：(provider, mode, model, prompt, count, size, quality, �
 # ---------- 模型列表缓存 ----------
 MODELS_CACHE = {}  # (base_url, api_key) -> (ts, ids)
 MODELS_TTL = 180
+CONFIG_LOCK = threading.Lock()  # config.json 的读-改-写要串行，两套接口会并发拉模型
 
 
 def gateway_models(base_url, api_key, timeout=30):
@@ -264,9 +265,31 @@ def load_config():
             DEFAULT_GPT if p == "gpt" else DEFAULT_NANO)["base_url"]
     cfg["provider"] = norm_provider(raw.get("provider"))
     cfg["max_parallel"] = norm_parallel(raw.get("max_parallel"), PARALLEL_DEFAULT)
-    if isinstance(raw.get("prices"), dict):
-        cfg["prices"] = {str(k): v for k, v in raw["prices"].items() if isinstance(v, (int, float))}
+    cfg["prices"] = normalize_prices(raw.get("prices"))
     return cfg
+
+
+def guess_provider(model_id):
+    """老配置里的价格是平铺的，按模型名猜它属于哪套接口。"""
+    m = str(model_id or "").lower()
+    if any(t in m for t in ("gemini", "banana", "imagen")):
+        return "nano"
+    return "gpt"
+
+
+def normalize_prices(raw):
+    """价格按 provider 分组存：{"gpt": {...}, "nano": {...}}；同时兼容旧的平铺写法。"""
+    prices = {p: {} for p in PROVIDERS}
+    if not isinstance(raw, dict):
+        return prices
+    for key, val in raw.items():
+        if key in PROVIDERS and isinstance(val, dict):
+            for mid, pv in val.items():
+                if isinstance(pv, (int, float)) and pv > 0:
+                    prices[key][str(mid)] = float(pv)
+        elif isinstance(val, (int, float)) and val > 0:
+            prices[guess_provider(key)][str(key)] = float(val)
+    return prices
 
 
 def save_config(cfg):
@@ -282,10 +305,38 @@ def mask(key):
     return key[:6] + "*" * 8 + key[-4:]
 
 
+def custom_prices(cfg):
+    """只返回用户自己填的价格（平铺），界面上用来区分「自定义」和「内置默认」。"""
+    out = {}
+    for p in PROVIDERS:
+        out.update((cfg.get("prices") or {}).get(p) or {})
+    return out
+
+
 def price_map(cfg):
     prices = dict(PRICES_CNY)
-    prices.update(cfg.get("prices") or {})
+    prices.update(custom_prices(cfg))
     return prices
+
+
+def prune_prices(provider, model_ids):
+    """拉取模型列表后对账：把已经不存在的模型的价格删掉。
+
+    只在拿到非空列表时动手，避免网关抽风返回空列表把价格全清空。
+    读-改-写全程持锁并重新读盘：两套接口的模型列表是并发拉的，
+    各自 prune 一次，不重新读就会互相把对方刚删的东西写回去。
+    返回 (dropped, prices, prices_custom)。
+    """
+    if not model_ids:
+        return [], None, None
+    with CONFIG_LOCK:
+        cfg = load_config()
+        custom = (cfg.get("prices") or {}).get(provider) or {}
+        dropped = sorted(set(custom) - set(model_ids))
+        if dropped:
+            cfg["prices"][provider] = {m: v for m, v in custom.items() if m in model_ids}
+            save_config(cfg)
+        return dropped, price_map(cfg), custom_prices(cfg)
 
 
 def public_config(cfg):
@@ -305,6 +356,8 @@ def public_config(cfg):
         "parallel_choices": list(PARALLEL_CHOICES),
         "parallel": GATE.snapshot(),
         "prices": price_map(cfg),
+        "prices_custom": custom_prices(cfg),
+        "prices_builtin": dict(PRICES_CNY),
     }
 
 
@@ -399,28 +452,29 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/config":
                 body = read_body(self)
-                cfg = load_config()
-                # body.provider 指「要改哪一段配置」；只有 activate 才顺带记住当前界面用的是哪套
-                if body.get("activate"):
-                    cfg["provider"] = norm_provider(body.get("provider"), cfg["provider"])
-                prov = norm_provider(body.get("provider") or cfg["provider"])
-                section = cfg[prov]
-                if body.get("base_url"):
-                    section["base_url"] = body["base_url"].strip().rstrip("/")
-                if body.get("model"):
-                    section["model"] = body["model"].strip()
-                if body.get("api_key"):
-                    section["api_key"] = body["api_key"].strip()
-                    with LOCK:
-                        MODELS_CACHE.clear()  # 换 Key 后模型列表要重新拉
-                if body.get("clear_key"):
-                    section["api_key"] = ""
-                    with LOCK:
-                        MODELS_CACHE.clear()
-                if "max_parallel" in body:
-                    cfg["max_parallel"] = norm_parallel(body.get("max_parallel"))
-                    GATE.set_limit(cfg["max_parallel"])
-                save_config(cfg)
+                with CONFIG_LOCK:
+                    cfg = load_config()
+                    # body.provider 指「要改哪一段配置」；只有 activate 才顺带记住当前界面用的是哪套
+                    if body.get("activate"):
+                        cfg["provider"] = norm_provider(body.get("provider"), cfg["provider"])
+                    prov = norm_provider(body.get("provider") or cfg["provider"])
+                    section = cfg[prov]
+                    if body.get("base_url"):
+                        section["base_url"] = body["base_url"].strip().rstrip("/")
+                    if body.get("model"):
+                        section["model"] = body["model"].strip()
+                    if body.get("api_key"):
+                        section["api_key"] = body["api_key"].strip()
+                        with LOCK:
+                            MODELS_CACHE.clear()  # 换 Key 后模型列表要重新拉
+                    if body.get("clear_key"):
+                        section["api_key"] = ""
+                        with LOCK:
+                            MODELS_CACHE.clear()
+                    if "max_parallel" in body:
+                        cfg["max_parallel"] = norm_parallel(body.get("max_parallel"))
+                        GATE.set_limit(cfg["max_parallel"])
+                    save_config(cfg)
                 return self.send_json(dict(public_config(cfg), ok=True))
 
             if path == "/api/models":
@@ -432,10 +486,37 @@ class Handler(BaseHTTPRequestHandler):
                 if not key:
                     return self.send_json({"ok": False, "error": "请先填写 API Key", "provider": prov}, 200)
                 ids = gateway_models(base, key, timeout=int(body.get("timeout") or 30))
+                dropped, prices, custom = prune_prices(prov, ids)  # 下架的模型，价格跟着删
                 ids.sort(key=lambda m: (0 if looks_image(m) else 1, m))
                 return self.send_json({
                     "ok": True, "provider": prov,
                     "models": [{"id": m, "image": looks_image(m)} for m in ids],
+                    "dropped_prices": dropped,
+                    "prices": prices if prices is not None else price_map(cfg),
+                    "prices_custom": custom if custom is not None else custom_prices(cfg),
+                })
+
+            if path == "/api/prices":
+                body = read_body(self)
+                prov = norm_provider(body.get("provider") or load_config()["provider"])
+                clean = {}
+                for mid, val in (body.get("prices") or {}).items():
+                    if val in (None, ""):
+                        continue
+                    try:
+                        f = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if f > 0:
+                        clean[str(mid)] = round(f, 4)
+                with CONFIG_LOCK:
+                    cfg = load_config()
+                    cfg["prices"][prov] = clean
+                    save_config(cfg)
+                return self.send_json({
+                    "ok": True, "provider": prov,
+                    "prices": price_map(cfg),
+                    "prices_custom": custom_prices(cfg),
                 })
 
             if path == "/api/jobs":
