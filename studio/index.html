@@ -147,6 +147,9 @@
     background-image:linear-gradient(45deg,transparent 50%,#8b8b93 50%),linear-gradient(135deg,#8b8b93 50%,transparent 50%);
     background-position:calc(100% - 14px) 52%,calc(100% - 10px) 52%;background-size:4px 4px,4px 4px;background-repeat:no-repeat}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .qhint{font-size:11px;color:var(--ink-3);line-height:1.5;margin-top:6px;
+    border-left:2px solid var(--line);padding-left:6px}
+  .qhint:empty{display:none}
 
   .drop{border:1.5px dashed #dcdce1;border-radius:10px;background:#fcfcfd;padding:14px;text-align:center;
     color:var(--ink-3);font-size:12.5px;transition:.15s}
@@ -377,17 +380,18 @@
             </div>
           </div>
           <div>
-            <label class="f">质量</label>
+            <label class="f">质量 <span class="sub">· 不切模型</span></label>
             <select id="quality">
               <option value="low">low 快/便宜</option>
               <option value="medium">medium 均衡</option>
               <option value="high" selected>high 精修</option>
               <option value="auto">auto</option>
             </select>
+            <div class="qhint" id="qualityHint"></div>
           </div>
         </div>
 
-        <div class="row">
+        <div class="row" style="margin-top:10px">
           <div>
             <label class="f">背景</label>
             <select id="background">
@@ -941,7 +945,11 @@ function renderQuality(){
   const sel = $("#quality");
   const want = sel.value;
   const model = state.model[state.provider] || "";
-  const is25 = /gpt-image-2\.5/.test(model);
+  // 2.5 的 xhigh/max 只有「真 2.5」才认：模型名带 -flare/-sunburst，
+  // 或者网关里确实列出了这两个 ID（聚合版网关一般把质量夹到 high，传了会 400）
+  const ids = (state.models[state.provider] || []).map(m => m.id);
+  const real25 = ids.some(id => /gpt-image-2\.5-(flare|sunburst)/.test(id));
+  const is25 = /gpt-image-2\.5/.test(model) && (real25 || /gpt-image-2\.5-(flare|sunburst)/.test(model));
   const opts = [
     ["low", "low 快/便宜"], ["medium", "medium 均衡"], ["high", "high 精修"],
   ];
@@ -952,6 +960,31 @@ function renderQuality(){
   opts.push(["auto", "auto"]);
   sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
   sel.value = [...sel.options].some(o => o.value === want) ? want : "high";
+  renderQualityHint();
+}
+
+/* 质量 ≠ 模型：把两者的关系直接写在面板上，别让人猜 */
+function renderQualityHint(){
+  const box = $("#qualityHint");
+  if(!box) return;
+  const model = state.model[state.provider] || "";
+  const ids = (state.models[state.provider] || []).map(m => m.id);
+  const real25 = ids.some(id => /gpt-image-2\.5-(flare|sunburst)/.test(id));
+  let text = "";
+  if(/gpt-image-2\.5-flare/.test(model)){
+    text = "快档模型；xhigh/max 仅 2.5 认";
+  }else if(/gpt-image-2\.5-sunburst/.test(model)){
+    text = "质档模型，更慢更细";
+  }else if(/gpt-image-2\.5/.test(model) && !real25){
+    text = "聚合模型：选不到 Flare/Sunburst，质量最高到 high";
+  }else if(/gpt-image-2\.5/.test(model)){
+    text = "聚合入口；要明确指定就选 -flare / -sunburst";
+  }else if(/gpt-image-2(\.|$)/.test(model)){
+    text = "2 只有这一个模型，最高到 high；Flare/Sunburst 属于 2.5";
+  }else{
+    text = "质量是 token 档位，不切模型";
+  }
+  box.textContent = text;
 }
 
 function renderCountHint(){
